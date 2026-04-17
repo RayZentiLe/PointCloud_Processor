@@ -1,7 +1,6 @@
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout,
-    QComboBox, QLineEdit,
-    QDialogButtonBox, QLabel, QMessageBox,
+    QDialog, QVBoxLayout, QFormLayout, QComboBox,
+    QLineEdit, QDialogButtonBox, QGroupBox, QLabel, QMessageBox,
 )
 from core.layer import PointCloudLayer, MeshLayer
 
@@ -10,69 +9,62 @@ class CombineDialog(QDialog):
     def __init__(self, layer_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Combine Layers")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(380)
         self.lm = layer_manager
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Select two layers of the same type"))
 
-        form = QFormLayout()
+        info = QLabel("Merge two same-type layers into one.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
-        self.type_combo = QComboBox()
-        self.type_combo.addItems(["Point Cloud", "Mesh"])
-        self.type_combo.currentIndexChanged.connect(self._refresh)
-        form.addRow("Type:", self.type_combo)
+        grp = QGroupBox("Select Layers")
+        form = QFormLayout(grp)
 
-        self.combo_a = QComboBox()
-        self.combo_b = QComboBox()
-        form.addRow("Layer A:", self.combo_a)
-        form.addRow("Layer B:", self.combo_b)
+        self._combo_a = QComboBox()
+        self._combo_b = QComboBox()
+        all_layers = self.lm.get_all_layers()
+        for l in all_layers:
+            tag = "PC" if isinstance(l, PointCloudLayer) else "Mesh"
+            label = f"{l.name} [{tag}]"
+            self._combo_a.addItem(label, l.id)
+            self._combo_b.addItem(label, l.id)
+        if self._combo_b.count() > 1:
+            self._combo_b.setCurrentIndex(1)
 
-        self.name_edit = QLineEdit()
-        form.addRow("New Name:", self.name_edit)
+        form.addRow("Layer A:", self._combo_a)
+        form.addRow("Layer B:", self._combo_b)
 
-        layout.addLayout(form)
+        self._name_edit = QLineEdit("combined")
+        form.addRow("Result Name:", self._name_edit)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._validate)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        layout.addWidget(grp)
 
-        self._refresh()
-
-    def _refresh(self):
-        self.combo_a.clear()
-        self.combo_b.clear()
-        layers = (list(self.lm.point_clouds.values())
-                  if self.type_combo.currentIndex() == 0
-                  else list(self.lm.meshes.values()))
-        for layer in layers:
-            self.combo_a.addItem(layer.name, layer.id)
-            self.combo_b.addItem(layer.name, layer.id)
-        if self.combo_a.count() >= 2:
-            self.combo_b.setCurrentIndex(1)
-        a = self.combo_a.currentText()
-        b = self.combo_b.currentText()
-        if a and b:
-            self.name_edit.setText(f"{a}+{b}")
+        bbox = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bbox.accepted.connect(self._validate)
+        bbox.rejected.connect(self.reject)
+        layout.addWidget(bbox)
 
     def _validate(self):
-        if self.combo_a.count() < 2:
-            QMessageBox.warning(self, "Combine",
-                                "Need at least 2 layers of the same type.")
+        id_a = self._combo_a.currentData()
+        id_b = self._combo_b.currentData()
+        if id_a == id_b:
+            QMessageBox.warning(self, "Combine", "Select two different layers.")
             return
-        if self.combo_a.currentData() == self.combo_b.currentData():
-            QMessageBox.warning(self, "Combine",
-                                "Select two different layers.")
-            return
-        if not self.name_edit.text().strip():
-            QMessageBox.warning(self, "Combine", "Enter a name.")
+        a = self.lm.get_layer(id_a)
+        b = self.lm.get_layer(id_b)
+        if type(a) != type(b):
+            QMessageBox.warning(
+                self, "Combine",
+                "Both layers must be the same type\n"
+                "(both point clouds or both meshes).")
             return
         self.accept()
 
     def get_params(self):
-        return dict(
-            layer_a_id=self.combo_a.currentData(),
-            layer_b_id=self.combo_b.currentData(),
-            name=self.name_edit.text().strip(),
-        )
+        return {
+            "layer_a_id": self._combo_a.currentData(),
+            "layer_b_id": self._combo_b.currentData(),
+            "name": self._name_edit.text().strip() or "combined",
+        }

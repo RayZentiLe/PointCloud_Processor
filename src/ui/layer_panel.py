@@ -1,3 +1,4 @@
+import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
     QMenu, QInputDialog, QColorDialog, QMessageBox,
@@ -74,20 +75,54 @@ class LayerPanel(QWidget):
     def _rebuild(self):
         self.tree.blockSignals(True)
 
+        # Save current selection
+        saved_lid = self.lm.selected_layer_id
+        saved_sub = self.lm.selected_sublayer_name
+
         # clear children
         for grp in (self._pc_grp, self._mesh_grp):
             while grp.childCount():
                 grp.removeChild(grp.child(0))
 
+        item_to_select = None
+
         for layer in self.lm.point_clouds.values():
-            self._add_layer_item(self._pc_grp, layer, is_pc=True)
+            item = self._add_layer_item(self._pc_grp, layer, is_pc=True)
+            if layer.id == saved_lid:
+                if saved_sub is None:
+                    item_to_select = item
+                else:
+                    # find sublayer item
+                    for ci in range(item.childCount()):
+                        child = item.child(ci)
+                        if child.text(0) == saved_sub:
+                            item_to_select = child
+                            break
+                    if item_to_select is None:
+                        item_to_select = item
+
         for layer in self.lm.meshes.values():
-            self._add_layer_item(self._mesh_grp, layer, is_pc=False)
+            item = self._add_layer_item(self._mesh_grp, layer, is_pc=False)
+            if layer.id == saved_lid:
+                if saved_sub is None:
+                    item_to_select = item
+                else:
+                    for ci in range(item.childCount()):
+                        child = item.child(ci)
+                        if child.text(0) == saved_sub:
+                            item_to_select = child
+                            break
+                    if item_to_select is None:
+                        item_to_select = item
 
         self._pc_grp.setText(1, f"{len(self.lm.point_clouds)} layers")
         self._mesh_grp.setText(1, f"{len(self.lm.meshes)} layers")
 
         self.tree.blockSignals(False)
+
+        # Restore selection
+        if item_to_select is not None:
+            self.tree.setCurrentItem(item_to_select)
 
     def _add_layer_item(self, parent, layer, is_pc):
         item = QTreeWidgetItem(parent)
@@ -114,6 +149,7 @@ class LayerPanel(QWidget):
             p.setData(0, _R_POS, True)
             p.setData(0, _R_TYPE, "sub")
             p.setCheckState(0, Qt.Checked if mg.positive_visible else Qt.Unchecked)
+            # mask color > parent color > gray
             clr = mg.positive_color or layer.display_color or (0.6, 0.6, 0.6)
             p.setIcon(0, self._color_icon(clr))
 
@@ -126,8 +162,11 @@ class LayerPanel(QWidget):
             n.setData(0, _R_POS, False)
             n.setData(0, _R_TYPE, "sub")
             n.setCheckState(0, Qt.Checked if mg.negative_visible else Qt.Unchecked)
-            clr = mg.negative_color or (1.0, 0.3, 0.3)
+            # mask color > parent color > gray
+            clr = mg.negative_color or layer.display_color or (0.6, 0.6, 0.6)
             n.setIcon(0, self._color_icon(clr))
+
+        return item
 
     # ── checkbox / selection ─────────────────────────────────────
 
@@ -145,15 +184,12 @@ class LayerPanel(QWidget):
 
     def _on_sel(self, cur, _prev):
         if cur is None:
-            self.lm.set_selection(None, None)
             return
         tp = cur.data(0, _R_TYPE)
         if tp == "layer":
             self.lm.set_selection(cur.data(0, _R_LID), None)
         elif tp == "sub":
             self.lm.set_selection(cur.data(0, _R_LID), cur.text(0))
-        else:
-            self.lm.set_selection(None, None)
 
     # ── context menu ─────────────────────────────────────────────
 

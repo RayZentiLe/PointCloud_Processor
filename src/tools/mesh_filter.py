@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import open3d as o3d
 from core.layer import MaskGroup
@@ -5,25 +6,14 @@ from core.layer import MaskGroup
 
 def run_mesh_filter(vertices, faces, face_indices, total_face_count,
                     progress_cb):
-    """Keep-largest-component filter for meshes.
+    print(f"[MeshFilter] Starting: {len(vertices)} verts, {len(faces)} faces, "
+          f"subset={face_indices is not None}", file=sys.stderr)
 
-    Parameters
-    ----------
-    vertices : (V, 3) full vertex array
-    faces : (F, 3) full face array
-    face_indices : which faces to evaluate (None = all)
-    total_face_count : len(full faces)
-
-    Returns
-    -------
-    (MaskGroup, n_components, largest_count, small_count)
-    """
     if face_indices is None:
         face_indices = np.arange(total_face_count, dtype=np.int64)
 
     subset_faces = faces[face_indices]
 
-    # remap vertices so open3d gets a compact mesh
     used_vert_ids = np.unique(subset_faces.ravel())
     vert_map = np.full(len(vertices), -1, dtype=np.int64)
     vert_map[used_vert_ids] = np.arange(len(used_vert_ids))
@@ -52,6 +42,8 @@ def run_mesh_filter(vertices, faces, face_indices, total_face_count,
     n_components = len(counts)
     largest_count = int(counts[largest_id])
     small_count = int(np.sum(~local_mask))
+    print(f"[MeshFilter] Done: {n_components} components, "
+          f"largest={largest_count}, small={small_count}", file=sys.stderr)
     progress_cb(100)
 
     mg = MaskGroup(

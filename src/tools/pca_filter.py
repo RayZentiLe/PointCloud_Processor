@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 from scipy.spatial import cKDTree
 from core.layer import MaskGroup
@@ -6,32 +7,23 @@ from core.layer import MaskGroup
 def run_pca_filter(points, indices, total_count,
                    radius, threshold, k_neighbors,
                    chunk_size, progress_cb):
-    """PCA planarity filter for point clouds.
+    print(f"[PCA] Starting: {len(points)} points, radius={radius}, "
+          f"threshold={threshold}, k={k_neighbors}", file=sys.stderr)
 
-    Parameters
-    ----------
-    points : (M, 3) subset to evaluate
-    indices : int array mapping subset back to parent, or None for all
-    total_count : length of parent point array
-    radius : neighbourhood search radius
-    threshold : planarity threshold (0-1)
-    k_neighbors : minimum neighbours required
-    chunk_size : points per batch
-    progress_cb : callable(int 0-100)
-
-    Returns
-    -------
-    MaskGroup
-    """
     if indices is None:
         indices = np.arange(total_count, dtype=np.int64)
 
+    if len(points) == 0:
+        raise ValueError("No points to process")
+
     progress_cb(0)
+    print("[PCA] Building KDTree...", file=sys.stderr)
     tree = cKDTree(points)
     kept_local = np.zeros(len(points), dtype=bool)
 
     n_chunks = max(1, len(points) // chunk_size)
     chunks = np.array_split(np.arange(len(points)), n_chunks)
+    print(f"[PCA] Processing {n_chunks} chunks...", file=sys.stderr)
 
     for ci, chunk_idx in enumerate(chunks):
         chunk_pts = points[chunk_idx]
@@ -52,10 +44,17 @@ def run_pca_filter(points, indices, total_count,
             except np.linalg.LinAlgError:
                 continue
 
-        progress_cb(int((ci + 1) / len(chunks) * 100))
+        pct = int((ci + 1) / len(chunks) * 100)
+        progress_cb(pct)
+        if ci % max(1, len(chunks) // 10) == 0:
+            print(f"[PCA] {pct}%", file=sys.stderr)
 
     full_mask = np.zeros(total_count, dtype=bool)
     full_mask[indices] = kept_local
+
+    kept_n = int(np.sum(full_mask))
+    reject_n = int(total_count - kept_n)
+    print(f"[PCA] Done: kept={kept_n}, rejected={reject_n}", file=sys.stderr)
 
     return MaskGroup(
         filter_name="pca_filter",

@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 from scipy.spatial import cKDTree
 from core.layer import MaskGroup
@@ -5,10 +6,10 @@ from core.layer import MaskGroup
 
 def run_noise_removal(points, indices, total_count,
                       mesh_vertices, threshold, progress_cb):
-    """Point-to-mesh-vertex distance filter.
+    print(f"[NoiseRemoval] Starting: {len(points)} points, "
+          f"{len(mesh_vertices)} mesh verts, threshold={threshold}",
+          file=sys.stderr)
 
-    Returns a MaskGroup (positive = clean, negative = noise).
-    """
     if indices is None:
         indices = np.arange(total_count, dtype=np.int64)
 
@@ -23,6 +24,11 @@ def run_noise_removal(points, indices, total_count,
 
     full_mask = np.zeros(total_count, dtype=bool)
     full_mask[indices] = clean_local
+
+    clean_n = int(np.sum(full_mask))
+    noise_n = int(total_count - clean_n)
+    print(f"[NoiseRemoval] Done: clean={clean_n}, noise={noise_n}",
+          file=sys.stderr)
     progress_cb(100)
 
     return MaskGroup(

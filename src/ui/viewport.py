@@ -1,3 +1,4 @@
+import sys
 import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
@@ -43,7 +44,7 @@ class Viewport(QWidget):
         lm.layer_added.connect(self._on_change)
         lm.layer_removed.connect(self._on_removed)
         lm.layer_modified.connect(self._on_change)
-        lm.layer_renamed.connect(lambda _: None)  # no visual update needed
+        lm.layer_renamed.connect(lambda _: None)
         lm.visibility_changed.connect(self._on_change)
         lm.mask_added.connect(lambda lid, mid: self._on_change(lid))
         lm.mask_removed.connect(lambda lid, mid: self._on_change(lid))
@@ -78,18 +79,43 @@ class Viewport(QWidget):
         layer = self.layer_manager.get_layer(layer_id)
         if layer is None or not layer.visible:
             return
-        if isinstance(layer, PointCloudLayer):
-            actors = self._build_pc(layer)
-        elif isinstance(layer, MeshLayer):
-            actors = self._build_mesh(layer)
-        else:
-            return
-        self._actors[layer_id] = actors
-        for a in actors:
-            self.renderer.AddActor(a)
+        try:
+            if isinstance(layer, PointCloudLayer):
+                actors = self._build_pc(layer)
+            elif isinstance(layer, MeshLayer):
+                actors = self._build_mesh(layer)
+            else:
+                return
+            self._actors[layer_id] = actors
+            for a in actors:
+                self.renderer.AddActor(a)
+        except Exception as e:
+            print(f"[Viewport] Error rebuilding {layer_id}: {e}",
+                  file=sys.stderr)
 
     def _render(self):
         self.vtk_widget.GetRenderWindow().Render()
+
+    # ── resolve color for a point/vertex ─────────────────────────
+    # Priority: mask_color > parent display_color > original vertex color > gray
+
+    def _base_colors_pc(self, layer):
+        """Return (N,3) float64 base colors for point cloud."""
+        n = layer.point_count
+        if layer.display_color is not None:
+            return np.tile(layer.display_color, (n, 1))
+        if layer.colors is not None:
+            return layer.colors.copy()
+        return np.full((n, 3), 0.6)
+
+    def _base_colors_mesh(self, layer):
+        """Return (V,3) float64 base colors for mesh."""
+        nv = layer.vertex_count
+        if layer.display_color is not None:
+            return np.tile(layer.display_color, (nv, 1))
+        if layer.vertex_colors is not None:
+            return layer.vertex_colors.copy()
+        return np.full((nv, 3), 0.8)
 
     # ── point cloud ──────────────────────────────────────────────
 
@@ -97,14 +123,7 @@ class Viewport(QWidget):
         if layer.points is None or len(layer.points) == 0:
             return []
         n = len(layer.points)
-
-        # base colors
-        if layer.colors is not None:
-            colors = layer.colors.copy()
-        elif layer.display_color is not None:
-            colors = np.tile(layer.display_color, (n, 1))
-        else:
-            colors = np.full((n, 3), 0.6)
+        colors = self._base_colors_pc(layer)
 
         if not layer.mask_groups:
             return [self._make_pc_actor(layer.points, colors)]
@@ -116,13 +135,15 @@ class Viewport(QWidget):
                 continue
             any_mask = True
             if mg.positive_visible:
-                visible |= mg.mask
+                pos_idx = mg.mask
+                visible |= pos_idx
                 if mg.positive_color is not None:
-                    colors[mg.mask] = mg.positive_color
+                    colors[pos_idx] = mg.positive_color
             if mg.negative_visible:
-                visible |= ~mg.mask
+                neg_idx = ~mg.mask
+                visible |= neg_idx
                 if mg.negative_color is not None:
-                    colors[~mg.mask] = mg.negative_color
+                    colors[neg_idx] = mg.negative_color
         if not any_mask:
             visible[:] = True
         if not np.any(visible):
@@ -130,7 +151,6 @@ class Viewport(QWidget):
         return [self._make_pc_actor(layer.points[visible], colors[visible])]
 
     def _make_pc_actor(self, points, colors):
-        n = len(points)
         vtk_pts = vtk.vtkPoints()
         arr = numpy_to_vtk(
             np.ascontiguousarray(points, dtype=np.float32),
@@ -168,14 +188,7 @@ class Viewport(QWidget):
             return []
         nv = len(layer.vertices)
         nf = len(layer.faces)
-
-        # base vertex colors
-        if layer.vertex_colors is not None:
-            colors = layer.vertex_colors.copy()
-        elif layer.display_color is not None:
-            colors = np.tile(layer.display_color, (nv, 1))
-        else:
-            colors = np.full((nv, 3), 0.8)
+        colors = self._base_colors_mesh(layer)
 
         if not layer.mask_groups:
             return [self._make_mesh_actor(
@@ -228,7 +241,6 @@ class Viewport(QWidget):
                 numpy_to_vtkIdTypeArray(offsets, deep=True),
                 numpy_to_vtkIdTypeArray(conn, deep=True))
         except (TypeError, AttributeError):
-            # VTK < 9 fallback
             legacy = np.column_stack([
                 np.full(nf, 3, dtype=np.int64),
                 faces.astype(np.int64)

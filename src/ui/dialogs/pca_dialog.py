@@ -1,56 +1,64 @@
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout,
-    QDoubleSpinBox, QSpinBox, QDialogButtonBox, QLabel,
+    QDialog, QVBoxLayout, QFormLayout, QDoubleSpinBox,
+    QSpinBox, QDialogButtonBox, QGroupBox, QLabel,
 )
 
 
 class PCADialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("PCA Filter Parameters")
-        self.setMinimumWidth(360)
+        self.setWindowTitle("PCA Filter Settings")
+        self.setMinimumWidth(380)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("PCA-based planarity filter"))
 
-        form = QFormLayout()
+        info = QLabel(
+            "PCA-based planarity filter.\n"
+            "Points in planar neighborhoods (high planarity) are kept.\n"
+            "Adjust radius and threshold for your data scale.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
-        self.radius = QDoubleSpinBox()
-        self.radius.setRange(0.01, 100.0)
-        self.radius.setValue(0.5)
-        self.radius.setDecimals(3)
-        self.radius.setSingleStep(0.1)
-        form.addRow("Search Radius:", self.radius)
+        grp = QGroupBox("Parameters")
+        form = QFormLayout(grp)
 
-        self.threshold = QDoubleSpinBox()
-        self.threshold.setRange(0.0, 1.0)
-        self.threshold.setValue(0.3)
-        self.threshold.setDecimals(3)
-        self.threshold.setSingleStep(0.05)
-        form.addRow("Planarity Threshold:", self.threshold)
+        self._radius = QDoubleSpinBox()
+        self._radius.setRange(0.001, 1000.0)
+        self._radius.setDecimals(4)
+        self._radius.setValue(0.05)
+        self._radius.setSingleStep(0.01)
+        form.addRow("Search Radius:", self._radius)
 
-        self.k_neighbors = QSpinBox()
-        self.k_neighbors.setRange(3, 200)
-        self.k_neighbors.setValue(10)
-        form.addRow("Min Neighbors:", self.k_neighbors)
+        self._threshold = QDoubleSpinBox()
+        self._threshold.setRange(0.0, 1.0)
+        self._threshold.setDecimals(3)
+        self._threshold.setValue(0.3)
+        self._threshold.setSingleStep(0.05)
+        form.addRow("Planarity Threshold:", self._threshold)
 
-        self.chunk_size = QSpinBox()
-        self.chunk_size.setRange(1000, 1_000_000)
-        self.chunk_size.setValue(50_000)
-        self.chunk_size.setSingleStep(10_000)
-        form.addRow("Chunk Size:", self.chunk_size)
+        self._k = QSpinBox()
+        self._k.setRange(3, 200)
+        self._k.setValue(10)
+        form.addRow("Min Neighbors (k):", self._k)
 
-        layout.addLayout(form)
+        self._chunk = QSpinBox()
+        self._chunk.setRange(100, 1000000)
+        self._chunk.setValue(50000)
+        self._chunk.setSingleStep(10000)
+        form.addRow("Chunk Size:", self._chunk)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        layout.addWidget(grp)
+
+        bbox = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bbox.accepted.connect(self.accept)
+        bbox.rejected.connect(self.reject)
+        layout.addWidget(bbox)
 
     def get_params(self):
-        return dict(
-            radius=self.radius.value(),
-            threshold=self.threshold.value(),
-            k_neighbors=self.k_neighbors.value(),
-            chunk_size=self.chunk_size.value(),
-        )
+        return {
+            "radius": self._radius.value(),
+            "threshold": self._threshold.value(),
+            "k_neighbors": self._k.value(),
+            "chunk_size": self._chunk.value(),
+        }

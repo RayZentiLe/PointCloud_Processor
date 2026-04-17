@@ -1,54 +1,62 @@
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout,
-    QDoubleSpinBox, QSpinBox, QCheckBox,
-    QDialogButtonBox, QLabel,
+    QDialog, QVBoxLayout, QFormLayout, QDoubleSpinBox,
+    QSpinBox, QCheckBox, QDialogButtonBox, QGroupBox, QLabel,
 )
 
 
 class PoissonDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Poisson Reconstruction")
-        self.setMinimumWidth(360)
+        self.setWindowTitle("Poisson Reconstruction Settings")
+        self.setMinimumWidth(380)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Poisson surface reconstruction parameters"))
 
-        form = QFormLayout()
+        info = QLabel(
+            "Screened Poisson surface reconstruction.\n"
+            "Higher depth = more detail but slower.\n"
+            "Density quantile trims low-confidence regions.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
 
-        self.depth = QSpinBox()
-        self.depth.setRange(4, 14)
-        self.depth.setValue(8)
-        form.addRow("Octree Depth:", self.depth)
+        grp = QGroupBox("Parameters")
+        form = QFormLayout(grp)
 
-        self.scale = QDoubleSpinBox()
-        self.scale.setRange(0.5, 5.0)
-        self.scale.setValue(1.1)
-        self.scale.setDecimals(2)
-        form.addRow("Scale:", self.scale)
+        self._depth = QSpinBox()
+        self._depth.setRange(1, 14)
+        self._depth.setValue(9)
+        form.addRow("Octree Depth:", self._depth)
 
-        self.density_quantile = QDoubleSpinBox()
-        self.density_quantile.setRange(0.0, 0.5)
-        self.density_quantile.setValue(0.05)
-        self.density_quantile.setDecimals(3)
-        self.density_quantile.setSingleStep(0.01)
-        form.addRow("Density Quantile:", self.density_quantile)
+        self._scale = QDoubleSpinBox()
+        self._scale.setRange(1.0, 5.0)
+        self._scale.setDecimals(2)
+        self._scale.setValue(1.1)
+        self._scale.setSingleStep(0.1)
+        form.addRow("Scale:", self._scale)
 
-        self.linear_fit = QCheckBox()
-        self.linear_fit.setChecked(False)
-        form.addRow("Linear Fit:", self.linear_fit)
+        self._dq = QDoubleSpinBox()
+        self._dq.setRange(0.0, 0.99)
+        self._dq.setDecimals(3)
+        self._dq.setValue(0.05)
+        self._dq.setSingleStep(0.01)
+        form.addRow("Density Quantile Trim:", self._dq)
 
-        layout.addLayout(form)
+        self._linear = QCheckBox("Enabled")
+        self._linear.setChecked(False)
+        form.addRow("Linear Fit:", self._linear)
 
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        layout.addWidget(grp)
+
+        bbox = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bbox.accepted.connect(self.accept)
+        bbox.rejected.connect(self.reject)
+        layout.addWidget(bbox)
 
     def get_params(self):
-        return dict(
-            depth=self.depth.value(),
-            scale=self.scale.value(),
-            density_quantile=self.density_quantile.value(),
-            linear_fit=self.linear_fit.isChecked(),
-        )
+        return {
+            "depth": self._depth.value(),
+            "scale": self._scale.value(),
+            "density_quantile": self._dq.value(),
+            "linear_fit": self._linear.isChecked(),
+        }

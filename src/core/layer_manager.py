@@ -58,6 +58,18 @@ class LayerManager(QObject):
             return self.get_layer(self._selected_layer_id)
         return None
 
+    def first_point_cloud(self):
+        """Return the first point cloud or None."""
+        for pc in self._point_clouds.values():
+            return pc
+        return None
+
+    def first_mesh(self):
+        """Return the first mesh or None."""
+        for m in self._meshes.values():
+            return m
+        return None
+
     # ── add / remove ─────────────────────────────────────────────
 
     def add_point_cloud(self, layer: PointCloudLayer):
@@ -191,25 +203,22 @@ class LayerManager(QObject):
     # ── selection ────────────────────────────────────────────────
 
     def set_selection(self, layer_id, sublayer_name=None):
+        changed = (self._selected_layer_id != layer_id or
+                   self._selected_sublayer_name != sublayer_name)
         self._selected_layer_id = layer_id
         self._selected_sublayer_name = sublayer_name
-        self.selection_changed.emit()
+        if changed:
+            self.selection_changed.emit()
 
     # ── static helpers ───────────────────────────────────────────
 
     @staticmethod
     def get_sublayer_mask(layer, sublayer_name) -> np.ndarray:
-        """Return bool array for the named sublayer.
-
-        For point-cloud layers the array length == point_count.
-        For mesh layers the array length == face_count.
-        """
         for mg in layer.mask_groups:
             if mg.positive_name == sublayer_name:
                 return mg.mask.copy()
             if mg.negative_name == sublayer_name:
                 return ~mg.mask
-        # fallback: everything selected
         if isinstance(layer, PointCloudLayer):
             n = layer.point_count
         elif isinstance(layer, MeshLayer):
@@ -220,7 +229,6 @@ class LayerManager(QObject):
 
     @staticmethod
     def get_sublayer_mask_group_info(layer, sublayer_name):
-        """Return (MaskGroup, is_positive) or (None, None)."""
         for mg in layer.mask_groups:
             if mg.positive_name == sublayer_name:
                 return mg, True
