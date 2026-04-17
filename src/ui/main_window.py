@@ -11,8 +11,8 @@ from ui.viewport import Viewport
 from ui.layer_panel import LayerPanel
 from ui.toolbar import Toolbar
 from ui.log_panel import LogPanel
-from io.ply_io import load_file
-from io.exporter import export_point_cloud, export_mesh
+from io_utils.ply_io import load_file
+from io_utils.exporter import export_point_cloud, export_mesh
 from workers.task_runner import TaskRunner
 
 
