@@ -31,6 +31,7 @@ pip install numpy scipy
 pip install PySide6
 pip install vtk
 pip install open3d
+pip install PyOpenGL PyOpenGL_accelerate
 
 echo ""
 echo "============================================"
