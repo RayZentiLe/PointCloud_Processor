@@ -79,11 +79,6 @@ class MainWindow(QMainWindow):
         lp.export_requested.connect(self._export_layer)
         lp.delete_requested.connect(self._delete_layer)
         lp.delete_mask_requested.connect(self._delete_mask)
-        lp.combine_requested.connect(self._combine_two)
-        lp.run_pca_requested.connect(self._run_pca)
-        lp.run_poisson_requested.connect(self._run_poisson)
-        lp.run_mesh_filter_requested.connect(self._run_mf)
-        lp.run_noise_removal_requested.connect(self._run_noise)
 
     # ── helpers ──────────────────────────────────────────────────
 

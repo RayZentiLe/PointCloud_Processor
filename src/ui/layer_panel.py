@@ -1,7 +1,7 @@
 import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QMenu, QInputDialog, QColorDialog, QMessageBox,
+    QMenu, QInputDialog, QMessageBox,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap, QColor
@@ -19,11 +19,6 @@ class LayerPanel(QWidget):
     export_requested = Signal(str, object)       # layer_id, sublayer_name|None
     delete_requested = Signal(str)               # layer_id
     delete_mask_requested = Signal(str, str)      # layer_id, mg_id
-    combine_requested = Signal(str, str)          # layer_id_a, layer_id_b
-    run_pca_requested = Signal()
-    run_poisson_requested = Signal()
-    run_mesh_filter_requested = Signal()
-    run_noise_removal_requested = Signal()
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
@@ -92,7 +87,6 @@ class LayerPanel(QWidget):
                 if saved_sub is None:
                     item_to_select = item
                 else:
-                    # find sublayer item
                     for ci in range(item.childCount()):
                         child = item.child(ci)
                         if child.text(0) == saved_sub:
@@ -149,7 +143,6 @@ class LayerPanel(QWidget):
             p.setData(0, _R_POS, True)
             p.setData(0, _R_TYPE, "sub")
             p.setCheckState(0, Qt.Checked if mg.positive_visible else Qt.Unchecked)
-            # mask color > parent color > gray
             clr = mg.positive_color or layer.display_color or (0.6, 0.6, 0.6)
             p.setIcon(0, self._color_icon(clr))
 
@@ -162,7 +155,6 @@ class LayerPanel(QWidget):
             n.setData(0, _R_POS, False)
             n.setData(0, _R_TYPE, "sub")
             n.setCheckState(0, Qt.Checked if mg.negative_visible else Qt.Unchecked)
-            # mask color > parent color > gray
             clr = mg.negative_color or layer.display_color or (0.6, 0.6, 0.6)
             n.setIcon(0, self._color_icon(clr))
 
@@ -205,35 +197,11 @@ class LayerPanel(QWidget):
             layer = self.lm.get_layer(lid)
             if layer is None:
                 return
+
+            menu.addAction("Select",
+                           lambda: self._select_item(item))
             menu.addAction("Rename",
                            lambda: self._rename_layer(lid))
-            menu.addAction("Set Color",
-                           lambda: self._set_layer_color(lid))
-            menu.addSeparator()
-
-            tools = menu.addMenu("Run Tool")
-            if isinstance(layer, PointCloudLayer):
-                tools.addAction("PCA Filter",
-                                lambda: self._sel_run(lid, None, "pca"))
-                tools.addAction("Poisson",
-                                lambda: self._sel_run(lid, None, "poisson"))
-                tools.addAction("Noise Removal",
-                                lambda: self._sel_run(lid, None, "noise"))
-            else:
-                tools.addAction("Keep Largest Component",
-                                lambda: self._sel_run(lid, None, "mf"))
-
-            combine = menu.addMenu("Combine With")
-            others = (self.lm.point_clouds if isinstance(layer, PointCloudLayer)
-                      else self.lm.meshes)
-            for o in others.values():
-                if o.id != lid:
-                    combine.addAction(
-                        o.name,
-                        lambda oid=o.id: self.combine_requested.emit(lid, oid))
-            if combine.isEmpty():
-                combine.setEnabled(False)
-
             menu.addSeparator()
             menu.addAction("Export",
                            lambda: self.export_requested.emit(lid, None))
@@ -242,30 +210,16 @@ class LayerPanel(QWidget):
 
         elif tp == "sub":
             mgid = item.data(0, _R_MGID)
-            is_pos = item.data(0, _R_POS)
             sname = item.text(0)
             layer = self.lm.get_layer(lid)
             if layer is None:
                 return
 
+            menu.addAction("Select",
+                           lambda: self._select_item(item))
             menu.addAction("Rename",
-                           lambda: self._rename_sub(lid, mgid, is_pos))
-            menu.addAction("Set Color",
-                           lambda: self._set_sub_color(lid, mgid, is_pos))
-            menu.addSeparator()
-
-            tools = menu.addMenu("Run Tool")
-            if isinstance(layer, PointCloudLayer):
-                tools.addAction("PCA Filter",
-                                lambda: self._sel_run(lid, sname, "pca"))
-                tools.addAction("Poisson",
-                                lambda: self._sel_run(lid, sname, "poisson"))
-                tools.addAction("Noise Removal",
-                                lambda: self._sel_run(lid, sname, "noise"))
-            else:
-                tools.addAction("Keep Largest Component",
-                                lambda: self._sel_run(lid, sname, "mf"))
-
+                           lambda: self._rename_sub(lid, mgid,
+                                                    item.data(0, _R_POS)))
             menu.addSeparator()
             menu.addAction("Export Sublayer",
                            lambda: self.export_requested.emit(lid, sname))
@@ -276,13 +230,8 @@ class LayerPanel(QWidget):
 
     # ── actions ──────────────────────────────────────────────────
 
-    def _sel_run(self, lid, sname, tool):
-        self.lm.set_selection(lid, sname)
-        sig = {"pca": self.run_pca_requested,
-               "poisson": self.run_poisson_requested,
-               "noise": self.run_noise_removal_requested,
-               "mf": self.run_mesh_filter_requested}[tool]
-        sig.emit()
+    def _select_item(self, item):
+        self.tree.setCurrentItem(item)
 
     def _rename_layer(self, lid):
         layer = self.lm.get_layer(lid)
@@ -313,32 +262,3 @@ class LayerPanel(QWidget):
             ok2, msg = self.lm.rename_sublayer(lid, mgid, is_pos, txt.strip())
             if not ok2:
                 QMessageBox.warning(self, "Rename", msg)
-
-    def _set_layer_color(self, lid):
-        layer = self.lm.get_layer(lid)
-        if not layer:
-            return
-        cur = layer.display_color or (0.6, 0.6, 0.6)
-        c = QColorDialog.getColor(
-            QColor(*(int(x * 255) for x in cur)), self, "Layer Color")
-        if c.isValid():
-            self.lm.set_layer_color(lid, (c.redF(), c.greenF(), c.blueF()))
-
-    def _set_sub_color(self, lid, mgid, is_pos):
-        layer = self.lm.get_layer(lid)
-        if not layer:
-            return
-        mg = None
-        for m in layer.mask_groups:
-            if m.id == mgid:
-                mg = m
-                break
-        if mg is None:
-            return
-        cur = (mg.positive_color if is_pos else mg.negative_color) or (0.6, 0.6, 0.6)
-        c = QColorDialog.getColor(
-            QColor(*(int(x * 255) for x in cur)), self, "Sublayer Color")
-        if c.isValid():
-            self.lm.set_sublayer_color(
-                lid, mgid, is_pos,
-                (c.redF(), c.greenF(), c.blueF()))
