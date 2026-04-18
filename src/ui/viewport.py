@@ -3,7 +3,9 @@ import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtCore import Qt, QEvent, QPoint
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QColorDialog, QMenu
+from PySide6.QtGui import QColor
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
 
@@ -13,6 +15,8 @@ class Viewport(QWidget):
         super().__init__(parent)
         self.layer_manager = layer_manager
         self._actors: dict[str, list[vtk.vtkActor]] = {}
+        self._bg_color = (0.0, 0.0, 0.0)
+        self._right_press_pos = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -21,9 +25,8 @@ class Viewport(QWidget):
         layout.addWidget(self.vtk_widget)
 
         self.renderer = vtk.vtkRenderer()
-        self.renderer.SetBackground(0.15, 0.15, 0.15)
-        self.renderer.SetBackground2(0.30, 0.30, 0.35)
-        self.renderer.GradientBackgroundOn()
+        self.renderer.SetBackground(*self._bg_color)
+        self.renderer.GradientBackgroundOff()
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
 
         interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
@@ -39,6 +42,9 @@ class Viewport(QWidget):
         self._orient.EnabledOn()
         self._orient.InteractiveOff()
 
+        # right-click tracking for background color picker
+        self.vtk_widget.installEventFilter(self)
+
         # signals
         lm = self.layer_manager
         lm.layer_added.connect(self._on_change)
@@ -51,6 +57,43 @@ class Viewport(QWidget):
 
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
+
+    # ── event filter (right-click → background color picker) ─────
+
+    def eventFilter(self, obj, event):
+        if obj is self.vtk_widget:
+            etype = event.type()
+            if etype == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.RightButton:
+                    self._right_press_pos = event.position().toPoint()
+            elif etype == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.RightButton:
+                    if self._right_press_pos is not None:
+                        release = event.position().toPoint()
+                        dx = abs(release.x() - self._right_press_pos.x())
+                        dy = abs(release.y() - self._right_press_pos.y())
+                        self._right_press_pos = None
+                        if dx + dy < 5:
+                            gp = event.globalPosition().toPoint()
+                            self._show_bg_menu(gp)
+                            return True  # consume so VTK doesn't also act
+        return super().eventFilter(obj, event)
+
+    def _show_bg_menu(self, global_pos):
+        menu = QMenu(self)
+        pick_action = menu.addAction("Change Background Color…")
+        chosen = menu.exec(global_pos)
+        if chosen == pick_action:
+            self._pick_bg_color()
+
+    def _pick_bg_color(self):
+        cur = QColor.fromRgbF(*self._bg_color)
+        color = QColorDialog.getColor(cur, self, "Background Color")
+        if color.isValid():
+            self._bg_color = (color.redF(), color.greenF(), color.blueF())
+            self.renderer.SetBackground(*self._bg_color)
+            self.renderer.GradientBackgroundOff()
+            self._render()
 
     # ── public ───────────────────────────────────────────────────
 
