@@ -6,6 +6,7 @@ from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PySide6.QtCore import Qt, QEvent, QPoint
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QColorDialog, QMenu
 from PySide6.QtGui import QColor
+from tools.gradient_colors import compute_gradient_colors
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
 
@@ -101,6 +102,18 @@ class Viewport(QWidget):
         self.renderer.ResetCamera()
         self._render()
 
+    def rebuild_all(self):
+        """Rebuild every visible layer's actors (called when visual props change)."""
+        # Clear all existing actors
+        for layer_id in list(self._actors.keys()):
+            self._clear_actors(layer_id)
+
+        # Rebuild from all known layers
+        for layer in self.layer_manager.get_all_layers():
+            self._rebuild(layer.id)
+
+        self._render()
+
     # ── private slots ────────────────────────────────────────────
 
     def _on_change(self, layer_id):
@@ -139,61 +152,74 @@ class Viewport(QWidget):
     def _render(self):
         self.vtk_widget.GetRenderWindow().Render()
 
-    # ── colour resolution (render_props) ─────────────────────────
+    # ── colour resolution (reads vis_* attributes from layer) ────
 
     def _resolve_pc_colors(self, layer):
-        """Return (N, 3) float64 base colours driven by render_props."""
+        """Return (N, 3) float64 colours using vis_* attributes from properties panel."""
         n = layer.point_count
-        mode = layer.render_props.get("color_mode", "original")
-        if mode == "solid":
-            sc = layer.render_props.get("solid_color", [0.7, 0.7, 0.7])
-            return np.tile(sc, (n, 1)).astype(np.float64)
-        if mode == "height_gradient":
-            return self._height_gradient(layer.points, layer.render_props)
-        # "original"
+        scheme = getattr(layer, "vis_color_scheme", "Original")
+
+        if scheme == "Solid":
+            sc = getattr(layer, "vis_solid_color", (0.2, 0.6, 1.0))
+            return np.tile(np.array(sc, dtype=np.float64), (n, 1))
+
+        if scheme == "Gradient":
+            axis = getattr(layer, "vis_gradient_dir", 2)
+            flip = getattr(layer, "vis_gradient_flip", False)
+            mode = getattr(layer, "vis_gradient_mode", "auto")
+            values = layer.points[:, axis]
+            
+            if mode == "manual":
+                mn = getattr(layer, "vis_gradient_min", None)
+                mx = getattr(layer, "vis_gradient_max", None)
+                if mn is None:
+                    mn = float(values.min())
+                if mx is None:
+                    mx = float(values.max())
+            else:
+                mn = float(values.min())
+                mx = float(values.max())
+            
+            # Handle flip: swap min/max for negative directions
+            if flip:
+                mn, mx = mx, mn
+            
+            return compute_gradient_colors(values, mn, mx).astype(np.float64)
+
+        # "Original" (default)
         if layer.colors is not None and len(layer.colors) == n:
             return layer.colors.copy().astype(np.float64)
         return np.full((n, 3), 0.6, dtype=np.float64)
 
     def _resolve_mesh_colors(self, layer):
-        """Return (V, 3) float64 base colours driven by render_props."""
+        """Return (V, 3) float64 colours using vis_* attributes from properties panel."""
         nv = layer.vertex_count
-        mode = layer.render_props.get("color_mode", "original")
-        if mode == "solid":
-            sc = layer.render_props.get("solid_color", [0.7, 0.7, 0.7])
-            return np.tile(sc, (nv, 1)).astype(np.float64)
-        if mode == "height_gradient":
-            return self._height_gradient(layer.vertices, layer.render_props)
-        # "original"
+        scheme = getattr(layer, "vis_color_scheme", "Original")
+
+        if scheme == "Solid":
+            sc = getattr(layer, "vis_solid_color", (0.2, 0.6, 1.0))
+            return np.tile(np.array(sc, dtype=np.float64), (nv, 1))
+
+        if scheme == "Gradient":
+            axis = getattr(layer, "vis_gradient_dir", 2)
+            mode = getattr(layer, "vis_gradient_mode", "auto")
+            values = layer.vertices[:, axis]
+            if mode == "manual":
+                mn = getattr(layer, "vis_gradient_min", None)
+                mx = getattr(layer, "vis_gradient_max", None)
+                if mn is None:
+                    mn = float(values.min())
+                if mx is None:
+                    mx = float(values.max())
+            else:
+                mn = float(values.min())
+                mx = float(values.max())
+            return compute_gradient_colors(values, mn, mx).astype(np.float64)
+
+        # "Original" (default)
         if layer.vertex_colors is not None and len(layer.vertex_colors) == nv:
             return layer.vertex_colors.copy().astype(np.float64)
         return np.full((nv, 3), 0.8, dtype=np.float64)
-
-    @staticmethod
-    def _height_gradient(pts, props):
-        """Blue → green → red gradient along the chosen axis.
-        Negative axes (e.g. "-Z") flip the direction so red is at the bottom."""
-        axis_str = props.get("gradient_axis", "Z")
-        flip = axis_str.startswith("-")
-        axis_letter = axis_str[-1]                # "X", "Y", or "Z"
-        col = {"X": 0, "Y": 1, "Z": 2}.get(axis_letter, 2)
-
-        vals = pts[:, col].astype(np.float64)
-        lo, hi = vals.min(), vals.max()
-        rng = hi - lo
-        if rng < 1e-12:
-            t = np.full(len(pts), 0.5)
-        else:
-            t = (vals - lo) / rng
-
-        if flip:
-            t = 1.0 - t
-
-        c = np.empty((len(pts), 3), dtype=np.float64)
-        c[:, 0] = np.clip(2 * t - 1, 0, 1)       # red
-        c[:, 1] = 1 - np.abs(2 * t - 1)           # green
-        c[:, 2] = np.clip(1 - 2 * t, 0, 1)        # blue
-        return c
 
     # ── point cloud ──────────────────────────────────────────────
 
@@ -202,7 +228,7 @@ class Viewport(QWidget):
             return []
         n = len(layer.points)
         colors = self._resolve_pc_colors(layer)
-        ps = layer.render_props.get("point_size", 2)
+        ps = getattr(layer, "vis_point_size", 2)
 
         if not layer.mask_groups:
             return [self._make_pc_actor(layer.points, colors, ps)]
@@ -359,7 +385,6 @@ class Viewport(QWidget):
         if not actors:
             return
 
-        # combined bounds across all actors for this layer
         xmin, xmax = float('inf'), float('-inf')
         ymin, ymax = float('inf'), float('-inf')
         zmin, zmax = float('inf'), float('-inf')
@@ -374,12 +399,9 @@ class Viewport(QWidget):
         cz = (zmin + zmax) / 2.0
 
         camera = self.renderer.GetActiveCamera()
-        # look along -Z (camera sits on +Z side, looking toward -Z)
         camera.SetFocalPoint(cx, cy, cz)
         camera.SetPosition(cx, cy, cz + 1.0)
         camera.SetViewUp(0, 1, 0)
 
-        # ResetCamera preserves the view direction but adjusts
-        # the distance so the layer fills the viewport
         self.renderer.ResetCamera(xmin, xmax, ymin, ymax, zmin, zmax)
         self._render()

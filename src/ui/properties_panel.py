@@ -1,311 +1,417 @@
 """
-Properties panel – displays and edits visual / colour properties of the
-currently-selected layer or sublayer.
-
-Designed as a standalone widget so that layer_panel.py stays focused on
-the tree structure and context-menu actions.
+Properties panel – layer info + visual appearance controls.
 """
 
+import numpy as np
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QFormLayout, QComboBox, QPushButton,
-    QLabel, QSlider, QGroupBox, QHBoxLayout, QColorDialog,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
+    QSlider, QPushButton, QColorDialog, QGroupBox, QFormLayout,
+    QRadioButton, QButtonGroup, QDoubleSpinBox, QFrame,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 
-from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
 
-# ordered list used by the combo box and for mapping
-_AXIS_ITEMS = ["Z (up)", "-Z (down)", "X", "-X", "Y", "-Y"]
-_AXIS_KEYS  = ["Z",      "-Z",        "X", "-X", "Y", "-Y"]
+# ── direction look-up tables ────────────────────────────────────
+#               0     1     2     3     4     5
+_DIR_ITEMS = ["X", "-X", "Y", "-Y", "Z", "-Z"]
+_DIR_AXIS  = [ 0,    0,   1,    1,   2,    2 ]   # coord column
+_DIR_FLIP  = [False, True, False, True, False, True]
+_DIR_DEFAULT_COMBO = 4    # "Z"
+
+
+def _combo_index(axis: int, flip: bool) -> int:
+    """Map (axis, flip) back to the combo-box row."""
+    for i, (a, f) in enumerate(zip(_DIR_AXIS, _DIR_FLIP)):
+        if a == axis and f == flip:
+            return i
+    return _DIR_DEFAULT_COMBO
 
 
 class PropertiesPanel(QWidget):
-    """Right-side dock widget for layer display properties."""
+    """Right-dock panel showing layer info and visual property controls."""
 
-    def __init__(self, layer_manager: LayerManager, parent=None):
+    visual_changed = Signal()           # viewport listens to this
+
+    def __init__(self, layer_manager, parent=None):
         super().__init__(parent)
         self.lm = layer_manager
-        self._updating = False          # prevents signal feedback loops
+        self._building = False          # guard against echo loops
+        self._auto_mins = None          # ndarray(3,) or None
+        self._auto_maxs = None
 
         self._build_ui()
-        self._connect()
+        self._connect_signals()
         self._refresh()
 
-    # ── build ────────────────────────────────────────────────────
+    # ================================================================
+    #  BUILD
+    # ================================================================
 
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(10)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
 
-        # placeholder when nothing selected
-        self._lbl_empty = QLabel("No layer selected")
-        self._lbl_empty.setAlignment(Qt.AlignCenter)
-        self._lbl_empty.setStyleSheet("color: #888;")
-        root.addWidget(self._lbl_empty)
+        # ── Layer info ───────────────────────────────────────────
+        info_grp = QGroupBox("Layer Info")
+        ifl = QFormLayout(info_grp)
+        ifl.setContentsMargins(8, 14, 8, 8)
+        ifl.setSpacing(4)
 
-        # ── layer info ──
-        self._grp_info = QGroupBox("Layer")
-        fl = QFormLayout()
-        fl.setContentsMargins(6, 6, 6, 6)
-        self._lbl_name  = QLabel("—")
-        self._lbl_name.setWordWrap(True)
-        self._lbl_type  = QLabel("—")
-        self._lbl_count = QLabel("—")
-        fl.addRow("Name:", self._lbl_name)
-        fl.addRow("Type:", self._lbl_type)
-        fl.addRow("Size:", self._lbl_count)
-        self._grp_info.setLayout(fl)
-        root.addWidget(self._grp_info)
+        self.lbl_name  = QLabel("—")
+        self.lbl_name.setWordWrap(True)
+        self.lbl_type  = QLabel("—")
+        self.lbl_count = QLabel("—")
+        ifl.addRow("Name:", self.lbl_name)
+        ifl.addRow("Type:", self.lbl_type)
+        ifl.addRow("Count:", self.lbl_count)
 
-        # ── display ──
-        self._grp_disp = QGroupBox("Display")
-        dl = QFormLayout()
-        dl.setContentsMargins(6, 6, 6, 6)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setFrameShadow(QFrame.Sunken)
+        ifl.addRow(sep)
 
-        self._cmb_mode = QComboBox()
-        self._cmb_mode.addItems(["Original", "Solid Colour", "Height Gradient"])
-        dl.addRow("Colour mode:", self._cmb_mode)
+        self.lbl_x = QLabel("—")
+        self.lbl_y = QLabel("—")
+        self.lbl_z = QLabel("—")
+        ifl.addRow("X range:", self.lbl_x)
+        ifl.addRow("Y range:", self.lbl_y)
+        ifl.addRow("Z range:", self.lbl_z)
 
-        self._btn_solid = self._make_color_btn()
-        dl.addRow("Solid colour:", self._btn_solid)
+        root.addWidget(info_grp)
 
-        self._cmb_axis = QComboBox()
-        self._cmb_axis.addItems(_AXIS_ITEMS)
-        dl.addRow("Gradient axis:", self._cmb_axis)
+        # ── Appearance ───────────────────────────────────────────
+        vis_grp = QGroupBox("Appearance")
+        vl = QVBoxLayout(vis_grp)
+        vl.setContentsMargins(8, 14, 8, 8)
+        vl.setSpacing(6)
 
-        # point-size row (point-clouds only)
+        # --- point size (top) --------------------------------
         ps_row = QHBoxLayout()
-        ps_row.setContentsMargins(0, 0, 0, 0)
-        self._sl_ps = QSlider(Qt.Horizontal)
-        self._sl_ps.setRange(1, 20)
-        self._sl_ps.setValue(2)
-        self._lbl_ps = QLabel("2")
-        self._lbl_ps.setMinimumWidth(18)
-        ps_row.addWidget(self._sl_ps, 1)
-        ps_row.addWidget(self._lbl_ps)
-        self._w_ps = QWidget()
-        self._w_ps.setLayout(ps_row)
-        dl.addRow("Point size:", self._w_ps)
+        ps_row.addWidget(QLabel("Point size:"))
+        self.sl_ps = QSlider(Qt.Horizontal)
+        self.sl_ps.setRange(1, 20)
+        self.sl_ps.setValue(2)
+        ps_row.addWidget(self.sl_ps, 1)
+        self.lbl_ps = QLabel("2")
+        self.lbl_ps.setMinimumWidth(18)
+        ps_row.addWidget(self.lbl_ps)
+        vl.addLayout(ps_row)
 
-        self._grp_disp.setLayout(dl)
-        root.addWidget(self._grp_disp)
+        # --- colour scheme combo ------------------------------
+        cs_row = QHBoxLayout()
+        cs_row.addWidget(QLabel("Color:"))
+        self.cmb_scheme = QComboBox()
+        self.cmb_scheme.addItems(["Original", "Solid", "Gradient"])
+        cs_row.addWidget(self.cmb_scheme, 1)
+        vl.addLayout(cs_row)
 
-        # ── sublayer colour ──
-        self._grp_sub = QGroupBox("Sublayer")
-        sl_lay = QFormLayout()
-        sl_lay.setContentsMargins(6, 6, 6, 6)
-        self._lbl_sub = QLabel("—")
-        self._lbl_sub.setWordWrap(True)
+        # --- solid-only controls ------------------------------
+        self.w_solid = QWidget()
+        sl = QHBoxLayout(self.w_solid)
+        sl.setContentsMargins(0, 4, 0, 0)
+        sl.addWidget(QLabel("Pick color:"))
+        self.btn_color = QPushButton("")
+        self.btn_color.setMinimumHeight(26)
+        self._solid_qc = QColor(51, 153, 255)
+        self._apply_swatch()
+        sl.addWidget(self.btn_color, 1)
+        vl.addWidget(self.w_solid)
 
-        sc_row = QHBoxLayout()
-        sc_row.setContentsMargins(0, 0, 0, 0)
-        self._btn_sub = self._make_color_btn()
-        self._btn_sub_reset = QPushButton("Reset")
-        self._btn_sub_reset.setFixedWidth(48)
-        self._btn_sub_reset.setToolTip(
-            "Clear explicit colour (inherit from layer)")
-        sc_row.addWidget(self._btn_sub, 1)
-        sc_row.addWidget(self._btn_sub_reset)
-        self._w_sub_clr = QWidget()
-        self._w_sub_clr.setLayout(sc_row)
+        # --- gradient-only controls ---------------------------
+        self.w_grad = QWidget()
+        gl = QVBoxLayout(self.w_grad)
+        gl.setContentsMargins(0, 4, 0, 0)
+        gl.setSpacing(6)
 
-        self._lbl_sub_hint = QLabel("")
-        self._lbl_sub_hint.setStyleSheet("color: #888; font-size: 11px;")
+        dir_row = QHBoxLayout()
+        dir_row.addWidget(QLabel("Axis:"))
+        self.cmb_dir = QComboBox()
+        self.cmb_dir.addItems(_DIR_ITEMS)
+        self.cmb_dir.setCurrentIndex(_DIR_DEFAULT_COMBO)
+        dir_row.addWidget(self.cmb_dir, 1)
+        gl.addLayout(dir_row)
 
-        sl_lay.addRow("Name:", self._lbl_sub)
-        sl_lay.addRow("Colour:", self._w_sub_clr)
-        sl_lay.addRow("", self._lbl_sub_hint)
-        self._grp_sub.setLayout(sl_lay)
-        root.addWidget(self._grp_sub)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Range:"))
+        self.rb_auto   = QRadioButton("Auto")
+        self.rb_manual = QRadioButton("Manual")
+        self.rb_auto.setChecked(True)
+        self.bg_mode = QButtonGroup(self)
+        self.bg_mode.addButton(self.rb_auto, 0)
+        self.bg_mode.addButton(self.rb_manual, 1)
+        mode_row.addWidget(self.rb_auto)
+        mode_row.addWidget(self.rb_manual)
+        mode_row.addStretch()
+        gl.addLayout(mode_row)
 
+        mm = QFormLayout()
+        mm.setContentsMargins(0, 0, 0, 0)
+        self.sp_min = QDoubleSpinBox()
+        self.sp_min.setRange(-1e7, 1e7)
+        self.sp_min.setDecimals(4)
+        self.sp_min.setSingleStep(0.1)
+        self.sp_min.setEnabled(False)
+        mm.addRow("Min:", self.sp_min)
+
+        self.sp_max = QDoubleSpinBox()
+        self.sp_max.setRange(-1e7, 1e7)
+        self.sp_max.setDecimals(4)
+        self.sp_max.setSingleStep(0.1)
+        self.sp_max.setEnabled(False)
+        mm.addRow("Max:", self.sp_max)
+
+        gl.addLayout(mm)
+        vl.addWidget(self.w_grad)
+
+        root.addWidget(vis_grp)
         root.addStretch(1)
 
-    @staticmethod
-    def _make_color_btn():
-        b = QPushButton()
-        b.setFixedHeight(24)
-        b.setMinimumWidth(48)
-        b.setCursor(Qt.PointingHandCursor)
-        return b
+    # ================================================================
+    #  SIGNALS
+    # ================================================================
 
-    # ── wiring ───────────────────────────────────────────────────
+    def _connect_signals(self):
+        self.lm.selection_changed.connect(self._refresh)
+        if hasattr(self.lm, "layers_changed"):
+            self.lm.layers_changed.connect(self._refresh)
 
-    def _connect(self):
-        lm = self.lm
-        lm.selection_changed.connect(self._refresh)
-        lm.layer_modified.connect(lambda _: self._refresh())
-        lm.layer_renamed.connect(lambda _: self._refresh())
-        lm.mask_added.connect(lambda a, b: self._refresh())
-        lm.mask_removed.connect(lambda a, b: self._refresh())
-        lm.layer_removed.connect(lambda _: self._refresh())
+        self.sl_ps.valueChanged.connect(self._on_ps)
+        self.cmb_scheme.currentIndexChanged.connect(self._on_scheme)
+        self.btn_color.clicked.connect(self._on_pick_color)
+        self.cmb_dir.currentIndexChanged.connect(self._on_grad_param)
+        self.bg_mode.buttonClicked.connect(self._on_mode)
+        self.sp_min.valueChanged.connect(self._on_grad_param)
+        self.sp_max.valueChanged.connect(self._on_grad_param)
 
-        self._cmb_mode.currentIndexChanged.connect(self._on_mode)
-        self._btn_solid.clicked.connect(self._on_pick_solid)
-        self._cmb_axis.currentIndexChanged.connect(self._on_axis)
-        self._sl_ps.valueChanged.connect(self._on_ps)
-        self._btn_sub.clicked.connect(self._on_pick_sub)
-        self._btn_sub_reset.clicked.connect(self._on_sub_reset)
-
-    # ── refresh ──────────────────────────────────────────────────
+    # ================================================================
+    #  REFRESH (model → UI)
+    # ================================================================
 
     def _refresh(self):
-        self._updating = True
-        try:
-            self._do_refresh()
-        finally:
-            self._updating = False
-
-    def _do_refresh(self):
+        self._building = True
         layer = self.lm.get_selected_layer()
-        sname = self.lm.selected_sublayer_name
-        has = layer is not None
 
-        self._lbl_empty.setVisible(not has)
-        self._grp_info.setVisible(has)
-        self._grp_disp.setVisible(has)
-        self._grp_sub.setVisible(False)
-
-        if not has:
+        if layer is None:
+            for lbl in (self.lbl_name, self.lbl_type, self.lbl_count,
+                        self.lbl_x, self.lbl_y, self.lbl_z):
+                lbl.setText("—")
+            self.w_solid.setVisible(False)
+            self.w_grad.setVisible(False)
+            self._building = False
             return
 
-        # ── info ──
-        self._lbl_name.setText(layer.name)
-        is_pc = isinstance(layer, PointCloudLayer)
-        if is_pc:
-            self._lbl_type.setText("Point Cloud")
-            self._lbl_count.setText(f"{layer.point_count:,} points")
+        # ── info labels ──────────────────────────────
+        self.lbl_name.setText(layer.name)
+
+        if isinstance(layer, PointCloudLayer):
+            self.lbl_type.setText("Point Cloud")
+            self.lbl_count.setText(f"{layer.point_count:,} points")
+            pts = layer.points
+        elif isinstance(layer, MeshLayer):
+            self.lbl_type.setText("Mesh")
+            self.lbl_count.setText(
+                f"{layer.face_count:,} faces · {layer.vertex_count:,} verts")
+            pts = layer.vertices
         else:
-            self._lbl_type.setText("Mesh")
-            self._lbl_count.setText(
-                f"{layer.face_count:,} faces · "
-                f"{layer.vertex_count:,} verts")
+            pts = np.empty((0, 3))
 
-        # ── display ──
-        props = layer.render_props
-        cm = props.get("color_mode", "original")
-        self._cmb_mode.setCurrentIndex(
-            {"original": 0, "solid": 1, "height_gradient": 2}.get(cm, 0))
+        if pts is not None and len(pts) > 0:
+            lo = pts.min(axis=0)
+            hi = pts.max(axis=0)
+            self.lbl_x.setText(f"{lo[0]:.4f}  →  {hi[0]:.4f}")
+            self.lbl_y.setText(f"{lo[1]:.4f}  →  {hi[1]:.4f}")
+            self.lbl_z.setText(f"{lo[2]:.4f}  →  {hi[2]:.4f}")
+            self._auto_mins = lo
+            self._auto_maxs = hi
+        else:
+            self.lbl_x.setText("—")
+            self.lbl_y.setText("—")
+            self.lbl_z.setText("—")
+            self._auto_mins = self._auto_maxs = None
 
-        sc = props.get("solid_color", [0.7, 0.7, 0.7])
-        self._paint_btn(self._btn_solid, sc)
-        self._btn_solid.setEnabled(cm == "solid")
+        # ── restore per-layer visual state ───────────
+        self.sl_ps.setValue(getattr(layer, "vis_point_size", 2))
+        self.lbl_ps.setText(str(self.sl_ps.value()))
 
-        ax = props.get("gradient_axis", "Z")
-        idx = _AXIS_KEYS.index(ax) if ax in _AXIS_KEYS else 0
-        self._cmb_axis.setCurrentIndex(idx)
-        self._cmb_axis.setEnabled(cm == "height_gradient")
+        scheme = getattr(layer, "vis_color_scheme", "Original")
+        idx = self.cmb_scheme.findText(scheme)
+        if idx >= 0:
+            self.cmb_scheme.setCurrentIndex(idx)
 
-        self._w_ps.setVisible(is_pc)
-        if is_pc:
-            ps = props.get("point_size", 2)
-            self._sl_ps.setValue(ps)
-            self._lbl_ps.setText(str(ps))
+        sc = getattr(layer, "vis_solid_color", None)
+        if sc:
+            self._solid_qc = QColor(
+                int(sc[0] * 255), int(sc[1] * 255), int(sc[2] * 255))
+            self._apply_swatch()
 
-        # ── sublayer ──
-        if sname and layer.mask_groups:
-            mg, is_pos = self.lm.get_sublayer_mask_group_info(
-                layer, sname)
-            if mg is not None:
-                self._grp_sub.setVisible(True)
-                self._lbl_sub.setText(sname)
-                explicit = (mg.positive_color if is_pos
-                            else mg.negative_color)
-                if explicit is not None:
-                    self._paint_btn(self._btn_sub, explicit)
-                    self._lbl_sub_hint.setText("Explicit colour set")
-                    self._btn_sub_reset.setEnabled(True)
-                else:
-                    if cm == "solid":
-                        self._paint_btn(self._btn_sub, sc)
-                        self._lbl_sub_hint.setText(
-                            "Inherited (solid colour)")
-                    elif cm == "height_gradient":
-                        self._paint_btn(self._btn_sub, [0.5, 0.5, 0.5])
-                        self._lbl_sub_hint.setText(
-                            "Inherited (height gradient)")
-                    else:
-                        self._paint_btn(self._btn_sub, [0.5, 0.5, 0.5])
-                        self._lbl_sub_hint.setText(
-                            "Inherited (original colours)")
-                    self._btn_sub_reset.setEnabled(False)
+        # vis_gradient_dir is always 0-2, vis_gradient_flip is bool
+        axis = getattr(layer, "vis_gradient_dir", 2)
+        flip = getattr(layer, "vis_gradient_flip", False)
+        self.cmb_dir.setCurrentIndex(_combo_index(axis, flip))
 
-    # ── colour button helper ─────────────────────────────────────
+        gmode = getattr(layer, "vis_gradient_mode", "auto")
+        self.rb_auto.setChecked(gmode == "auto")
+        self.rb_manual.setChecked(gmode == "manual")
+        self.sp_min.setEnabled(gmode == "manual")
+        self.sp_max.setEnabled(gmode == "manual")
 
-    @staticmethod
-    def _paint_btn(btn, rgb):
-        r, g, b = (int(c * 255) for c in rgb)
-        btn.setStyleSheet(
-            f"background-color: rgb({r},{g},{b}); "
-            f"border: 1px solid #666; border-radius: 2px;")
+        gmin = getattr(layer, "vis_gradient_min", None)
+        gmax = getattr(layer, "vis_gradient_max", None)
+        if gmode == "manual" and gmin is not None and gmax is not None:
+            self.sp_min.setValue(gmin)
+            self.sp_max.setValue(gmax)
+        elif self._auto_mins is not None:
+            self.sp_min.setValue(self._auto_mins[axis])
+            self.sp_max.setValue(self._auto_maxs[axis])
 
-    # ── callbacks ────────────────────────────────────────────────
+        self._update_visibility()
+        self._building = False
 
-    def _on_mode(self, idx):
-        if self._updating:
-            return
-        layer = self.lm.get_selected_layer()
-        if not layer:
-            return
-        modes = ["original", "solid", "height_gradient"]
-        self.lm.set_render_prop(layer.id, "color_mode", modes[idx])
+    # ================================================================
+    #  UI HELPERS
+    # ================================================================
 
-    def _on_pick_solid(self):
-        layer = self.lm.get_selected_layer()
-        if not layer:
-            return
-        cur = layer.render_props.get("solid_color", [0.7, 0.7, 0.7])
-        c = QColorDialog.getColor(
-            QColor.fromRgbF(*cur), self, "Solid Colour")
-        if c.isValid():
-            self.lm.set_render_prop(
-                layer.id, "solid_color",
-                [c.redF(), c.greenF(), c.blueF()])
+    def _update_visibility(self):
+        scheme = self.cmb_scheme.currentText()
+        self.w_solid.setVisible(scheme == "Solid")
+        self.w_grad.setVisible(scheme == "Gradient")
 
-    def _on_axis(self, idx):
-        if self._updating:
-            return
-        layer = self.lm.get_selected_layer()
-        if not layer:
-            return
-        self.lm.set_render_prop(
-            layer.id, "gradient_axis", _AXIS_KEYS[idx])
+    def _apply_swatch(self):
+        self.btn_color.setStyleSheet(
+            f"background-color: {self._solid_qc.name()}; "
+            f"border: 1px solid #888; min-height: 26px;")
+
+    def _cur_axis_flip(self):
+        """Return (axis_column, flip) from the current combo selection."""
+        ci = self.cmb_dir.currentIndex()
+        return _DIR_AXIS[ci], _DIR_FLIP[ci]
+
+    # ================================================================
+    #  SLOTS  (UI → model)
+    # ================================================================
 
     def _on_ps(self, val):
-        if self._updating:
+        self.lbl_ps.setText(str(val))
+        if self._building:
             return
-        self._lbl_ps.setText(str(val))
         layer = self.lm.get_selected_layer()
-        if not layer:
-            return
-        self.lm.set_render_prop(layer.id, "point_size", val)
+        if layer:
+            layer.vis_point_size = val
+            self._notify()
 
-    def _on_pick_sub(self):
+    def _on_scheme(self, _idx):
+        self._update_visibility()
+        if self._building:
+            return
         layer = self.lm.get_selected_layer()
-        sname = self.lm.selected_sublayer_name
-        if not layer or not sname:
-            return
-        mg, is_pos = self.lm.get_sublayer_mask_group_info(layer, sname)
-        if mg is None:
-            return
-        cur = (mg.positive_color if is_pos else mg.negative_color)
-        if cur is None:
-            cur = layer.render_props.get("solid_color", [0.7, 0.7, 0.7])
-        c = QColorDialog.getColor(
-            QColor.fromRgbF(*cur), self, "Sublayer Colour")
-        if c.isValid():
-            self.lm.set_sublayer_color(
-                layer.id, mg.id, is_pos,
-                (c.redF(), c.greenF(), c.blueF()))
+        if layer:
+            layer.vis_color_scheme = self.cmb_scheme.currentText()
+            self._notify()
 
-    def _on_sub_reset(self):
+    def _on_pick_color(self):
+        c = QColorDialog.getColor(self._solid_qc, self, "Solid Color")
+        if not c.isValid():
+            return
+        self._solid_qc = c
+        self._apply_swatch()
         layer = self.lm.get_selected_layer()
-        sname = self.lm.selected_sublayer_name
-        if not layer or not sname:
+        if layer:
+            layer.vis_solid_color = (c.redF(), c.greenF(), c.blueF())
+            self._notify()
+
+    def _on_mode(self):
+        manual = self.rb_manual.isChecked()
+        self.sp_min.setEnabled(manual)
+        self.sp_max.setEnabled(manual)
+
+        axis, _flip = self._cur_axis_flip()
+
+        if not manual and self._auto_mins is not None:
+            self._building = True
+            self.sp_min.setValue(self._auto_mins[axis])
+            self.sp_max.setValue(self._auto_maxs[axis])
+            self._building = False
+
+        if self._building:
             return
-        mg, is_pos = self.lm.get_sublayer_mask_group_info(layer, sname)
-        if mg is None:
+        layer = self.lm.get_selected_layer()
+        if layer:
+            layer.vis_gradient_mode = "manual" if manual else "auto"
+            if manual:
+                layer.vis_gradient_min = self.sp_min.value()
+                layer.vis_gradient_max = self.sp_max.value()
+            else:
+                layer.vis_gradient_min = None
+                layer.vis_gradient_max = None
+            self._notify()
+
+    def _on_grad_param(self):
+        if self._building:
             return
-        self.lm.set_sublayer_color(layer.id, mg.id, is_pos, None)
+        layer = self.lm.get_selected_layer()
+        if layer is None:
+            return
+
+        axis, flip = self._cur_axis_flip()
+        layer.vis_gradient_dir  = axis      # always 0, 1, or 2
+        layer.vis_gradient_flip = flip      # True for negative dirs
+
+        if self.rb_auto.isChecked() and self._auto_mins is not None:
+            self._building = True
+            self.sp_min.setValue(self._auto_mins[axis])
+            self.sp_max.setValue(self._auto_maxs[axis])
+            self._building = False
+            layer.vis_gradient_min = None
+            layer.vis_gradient_max = None
+        else:
+            layer.vis_gradient_min = self.sp_min.value()
+            layer.vis_gradient_max = self.sp_max.value()
+
+        self._notify()
+
+    def _notify(self):
+        self.visual_changed.emit()
+        if hasattr(self.lm, "visual_changed"):
+            self.lm.visual_changed.emit()
+
+    # ================================================================
+    #  PUBLIC API  (viewport reads these)
+    # ================================================================
+
+    def get_gradient_range(self, layer):
+        """
+        Return ``(axis, min_val, max_val, is_manual)`` for the given
+        layer's current gradient settings.
+
+        *axis* is always 0, 1, or 2 (safe for ``points[:, axis]``).
+        When a negative direction is active, min/max are swapped so the
+        colour ramp reverses automatically.
+        """
+        axis = getattr(layer, "vis_gradient_dir", 2)
+        flip = getattr(layer, "vis_gradient_flip", False)
+        mode = getattr(layer, "vis_gradient_mode", "auto")
+
+        if isinstance(layer, PointCloudLayer):
+            coords = layer.points[:, axis]
+        elif isinstance(layer, MeshLayer):
+            coords = layer.vertices[:, axis]
+        else:
+            return axis, 0.0, 1.0, False
+
+        if mode == "manual":
+            mn = getattr(layer, "vis_gradient_min", None)
+            mx = getattr(layer, "vis_gradient_max", None)
+            if mn is not None and mx is not None:
+                mn, mx = float(mn), float(mx)
+                if flip:
+                    mn, mx = mx, mn
+                return axis, mn, mx, True
+
+        mn = float(coords.min())
+        mx = float(coords.max())
+        if flip:
+            mn, mx = mx, mn
+        return axis, mn, mx, False

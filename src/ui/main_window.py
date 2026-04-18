@@ -544,3 +544,22 @@ class MainWindow(QMainWindow):
         self.log.log(f"ERROR: {msg}")
         print(f"[MainWindow] Task FAILED: {msg}", file=sys.stderr)
         QMessageBox.critical(self, "Task Error", f"Task failed:\n\n{msg}")
+
+    def _connect(self):
+        tb = self.toolbar
+        tb.open_requested.connect(self._open)
+        tb.pca_requested.connect(self._run_pca)
+        tb.poisson_requested.connect(self._run_poisson)
+        tb.mesh_filter_requested.connect(self._run_mf)
+        tb.noise_removal_requested.connect(self._run_noise)
+        tb.export_requested.connect(self._export_sel)
+        tb.combine_requested.connect(self._combine_dlg)
+
+        lp = self.layer_panel
+        lp.export_requested.connect(self._export_layer)
+        lp.delete_requested.connect(self._delete_layer)
+        lp.delete_mask_requested.connect(self._delete_mask)
+        lp.camera_to_layer_requested.connect(self.viewport.focus_camera_on_layer)
+
+        # ── rebuild VTK actors when visual properties change ──
+        self.props_panel.visual_changed.connect(self.viewport.rebuild_all)
