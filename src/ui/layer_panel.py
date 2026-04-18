@@ -16,6 +16,7 @@ _R_TYPE = Qt.UserRole + 3     # "pc_grp" | "mesh_grp" | "layer" | "sub"
 
 
 class LayerPanel(QWidget):
+    camera_to_layer_requested = Signal(str)  
     export_requested = Signal(str, object)       # layer_id, sublayer_name|None
     delete_requested = Signal(str)               # layer_id
     delete_mask_requested = Signal(str, str)      # layer_id, mg_id
@@ -237,6 +238,10 @@ class LayerPanel(QWidget):
             menu.addAction("Delete Mask Group",
                            lambda: self.delete_mask_requested.emit(lid, mgid))
 
+
+        menu.addAction("Set Camera to Layer",
+                        lambda: self.camera_to_layer_requested.emit(lid))
+                        
         menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     # ── actions ──────────────────────────────────────────────────

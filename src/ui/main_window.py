@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         lp.export_requested.connect(self._export_layer)
         lp.delete_requested.connect(self._delete_layer)
         lp.delete_mask_requested.connect(self._delete_mask)
+        lp.camera_to_layer_requested.connect(self.viewport.focus_camera_on_layer)
 
     # ── helpers ──────────────────────────────────────────────────
 

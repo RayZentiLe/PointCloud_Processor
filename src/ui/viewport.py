@@ -352,3 +352,34 @@ class Viewport(QWidget):
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
         return actor
+
+    def focus_camera_on_layer(self, layer_id):
+        """Reset camera to XY-plane view (+Z out of screen), centered on the given layer."""
+        actors = self._actors.get(layer_id, [])
+        if not actors:
+            return
+
+        # combined bounds across all actors for this layer
+        xmin, xmax = float('inf'), float('-inf')
+        ymin, ymax = float('inf'), float('-inf')
+        zmin, zmax = float('inf'), float('-inf')
+        for actor in actors:
+            b = actor.GetBounds()
+            xmin = min(xmin, b[0]); xmax = max(xmax, b[1])
+            ymin = min(ymin, b[2]); ymax = max(ymax, b[3])
+            zmin = min(zmin, b[4]); zmax = max(zmax, b[5])
+
+        cx = (xmin + xmax) / 2.0
+        cy = (ymin + ymax) / 2.0
+        cz = (zmin + zmax) / 2.0
+
+        camera = self.renderer.GetActiveCamera()
+        # look along -Z (camera sits on +Z side, looking toward -Z)
+        camera.SetFocalPoint(cx, cy, cz)
+        camera.SetPosition(cx, cy, cz + 1.0)
+        camera.SetViewUp(0, 1, 0)
+
+        # ResetCamera preserves the view direction but adjusts
+        # the distance so the layer fills the viewport
+        self.renderer.ResetCamera(xmin, xmax, ymin, ymax, zmin, zmax)
+        self._render()
