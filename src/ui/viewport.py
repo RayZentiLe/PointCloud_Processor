@@ -202,8 +202,10 @@ class Viewport(QWidget):
 
         if scheme == "Gradient":
             axis = getattr(layer, "vis_gradient_dir", 2)
+            flip = getattr(layer, "vis_gradient_flip", False)
             mode = getattr(layer, "vis_gradient_mode", "auto")
             values = layer.vertices[:, axis]
+            
             if mode == "manual":
                 mn = getattr(layer, "vis_gradient_min", None)
                 mx = getattr(layer, "vis_gradient_max", None)
@@ -214,6 +216,11 @@ class Viewport(QWidget):
             else:
                 mn = float(values.min())
                 mx = float(values.max())
+            
+            # Handle flip: swap min/max for negative directions
+            if flip:
+                mn, mx = mx, mn
+            
             return compute_gradient_colors(values, mn, mx).astype(np.float64)
 
         # "Original" (default)

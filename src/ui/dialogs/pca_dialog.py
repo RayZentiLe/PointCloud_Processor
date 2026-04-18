@@ -25,7 +25,7 @@ class PCADialog(QDialog):
         self._radius = QDoubleSpinBox()
         self._radius.setRange(0.001, 1000.0)
         self._radius.setDecimals(4)
-        self._radius.setValue(0.05)
+        self._radius.setValue(0.50)
         self._radius.setSingleStep(0.01)
         form.addRow("Search Radius:", self._radius)
 

@@ -30,7 +30,7 @@ class NoiseDialog(QDialog):
         self._threshold = QDoubleSpinBox()
         self._threshold.setRange(0.0001, 1000.0)
         self._threshold.setDecimals(4)
-        self._threshold.setValue(0.05)
+        self._threshold.setValue(1.0)
         self._threshold.setSingleStep(0.01)
         form.addRow("Distance Threshold:", self._threshold)
 
