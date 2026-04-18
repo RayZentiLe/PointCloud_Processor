@@ -12,6 +12,7 @@ from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
 from ui.viewport import Viewport
 from ui.layer_panel import LayerPanel
+from ui.properties_panel import PropertiesPanel
 from ui.toolbar import Toolbar
 from ui.log_panel import LogPanel
 from io_utils.ply_io import load_file
@@ -38,11 +39,19 @@ class MainWindow(QMainWindow):
         self.viewport = Viewport(self.lm, self)
         self.setCentralWidget(self.viewport)
 
+        # left dock – layer tree
         self.layer_panel = LayerPanel(self.lm, self)
         ld = QDockWidget("Layers", self)
         ld.setWidget(self.layer_panel)
         ld.setMinimumWidth(290)
         self.addDockWidget(Qt.LeftDockWidgetArea, ld)
+
+        # right dock – properties
+        self.props_panel = PropertiesPanel(self.lm, self)
+        pd = QDockWidget("Properties", self)
+        pd.setWidget(self.props_panel)
+        pd.setMinimumWidth(260)
+        self.addDockWidget(Qt.RightDockWidgetArea, pd)
 
         self.toolbar = Toolbar(self.lm, self)
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
@@ -83,11 +92,9 @@ class MainWindow(QMainWindow):
     # ── helpers ──────────────────────────────────────────────────
 
     def _get_or_pick_pc(self):
-        """Get currently selected point cloud, or auto-pick the only one."""
         layer = self.lm.get_selected_layer()
         if isinstance(layer, PointCloudLayer):
             return layer
-        # Auto-fallback: if there's exactly one PC, use it
         pcs = list(self.lm.point_clouds.values())
         if len(pcs) == 1:
             self.lm.set_selection(pcs[0].id)
@@ -98,7 +105,6 @@ class MainWindow(QMainWindow):
         return None
 
     def _get_or_pick_mesh(self):
-        """Get currently selected mesh, or auto-pick the only one."""
         layer = self.lm.get_selected_layer()
         if isinstance(layer, MeshLayer):
             return layer
@@ -131,7 +137,6 @@ class MainWindow(QMainWindow):
                 self.log.log(
                     f"Loaded mesh: {layer.name} "
                     f"({layer.face_count:,} faces)")
-            # Auto-select the newly loaded layer
             self.lm.set_selection(layer.id)
             self.viewport.fit_all()
         except Exception as e:

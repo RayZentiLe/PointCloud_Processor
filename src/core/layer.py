@@ -53,6 +53,7 @@ class PointCloudLayer:
         self.render_props = {
             "color_mode": "original",        # "original" | "solid" | "height_gradient"
             "solid_color": [0.7, 0.7, 0.7],  # RGB 0-1, used when color_mode == "solid"
+            "gradient_axis": "Z",             # "X"|"Y"|"Z"|"-X"|"-Y"|"-Z"
             "render_mode": "points",          # "points" | "decoration"
             "point_size": 2,                  # 1-20
         }
@@ -86,6 +87,7 @@ class MeshLayer:
         self.render_props = {
             "color_mode": "original",        # "original" | "solid" | "height_gradient"
             "solid_color": [0.7, 0.7, 0.7],  # RGB 0-1, used when color_mode == "solid"
+            "gradient_axis": "Z",             # "X"|"Y"|"Z"|"-X"|"-Y"|"-Z"
             "render_mode": "normal",          # "normal" | "fancy"
         }
 

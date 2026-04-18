@@ -154,7 +154,7 @@ class LayerManager(QObject):
             mg.negative_visible = visible
         self.visibility_changed.emit(layer_id)
 
-    # ── color ────────────────────────────────────────────────────
+    # ── colour ───────────────────────────────────────────────────
 
     def set_layer_color(self, layer_id, color):
         layer = self.get_layer(layer_id)
@@ -174,6 +174,15 @@ class LayerManager(QObject):
         else:
             mg.negative_color = color
         self.layer_modified.emit(layer_id)
+
+    # ── render properties ────────────────────────────────────────
+
+    def set_render_prop(self, layer_id, key, value):
+        """Update one key in layer.render_props and notify."""
+        layer = self.get_layer(layer_id)
+        if layer is not None:
+            layer.render_props[key] = value
+            self.layer_modified.emit(layer_id)
 
     # ── masks ────────────────────────────────────────────────────
 

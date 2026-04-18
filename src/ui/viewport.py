@@ -76,7 +76,7 @@ class Viewport(QWidget):
                         if dx + dy < 5:
                             gp = event.globalPosition().toPoint()
                             self._show_bg_menu(gp)
-                            return True  # consume so VTK doesn't also act
+                            return True
         return super().eventFilter(obj, event)
 
     def _show_bg_menu(self, global_pos):
@@ -139,26 +139,61 @@ class Viewport(QWidget):
     def _render(self):
         self.vtk_widget.GetRenderWindow().Render()
 
-    # ── resolve color for a point/vertex ─────────────────────────
-    # Priority: mask_color > parent display_color > original vertex color > gray
+    # ── colour resolution (render_props) ─────────────────────────
 
-    def _base_colors_pc(self, layer):
-        """Return (N,3) float64 base colors for point cloud."""
+    def _resolve_pc_colors(self, layer):
+        """Return (N, 3) float64 base colours driven by render_props."""
         n = layer.point_count
-        if layer.display_color is not None:
-            return np.tile(layer.display_color, (n, 1))
-        if layer.colors is not None:
-            return layer.colors.copy()
-        return np.full((n, 3), 0.6)
+        mode = layer.render_props.get("color_mode", "original")
+        if mode == "solid":
+            sc = layer.render_props.get("solid_color", [0.7, 0.7, 0.7])
+            return np.tile(sc, (n, 1)).astype(np.float64)
+        if mode == "height_gradient":
+            return self._height_gradient(layer.points, layer.render_props)
+        # "original"
+        if layer.colors is not None and len(layer.colors) == n:
+            return layer.colors.copy().astype(np.float64)
+        return np.full((n, 3), 0.6, dtype=np.float64)
 
-    def _base_colors_mesh(self, layer):
-        """Return (V,3) float64 base colors for mesh."""
+    def _resolve_mesh_colors(self, layer):
+        """Return (V, 3) float64 base colours driven by render_props."""
         nv = layer.vertex_count
-        if layer.display_color is not None:
-            return np.tile(layer.display_color, (nv, 1))
-        if layer.vertex_colors is not None:
-            return layer.vertex_colors.copy()
-        return np.full((nv, 3), 0.8)
+        mode = layer.render_props.get("color_mode", "original")
+        if mode == "solid":
+            sc = layer.render_props.get("solid_color", [0.7, 0.7, 0.7])
+            return np.tile(sc, (nv, 1)).astype(np.float64)
+        if mode == "height_gradient":
+            return self._height_gradient(layer.vertices, layer.render_props)
+        # "original"
+        if layer.vertex_colors is not None and len(layer.vertex_colors) == nv:
+            return layer.vertex_colors.copy().astype(np.float64)
+        return np.full((nv, 3), 0.8, dtype=np.float64)
+
+    @staticmethod
+    def _height_gradient(pts, props):
+        """Blue → green → red gradient along the chosen axis.
+        Negative axes (e.g. "-Z") flip the direction so red is at the bottom."""
+        axis_str = props.get("gradient_axis", "Z")
+        flip = axis_str.startswith("-")
+        axis_letter = axis_str[-1]                # "X", "Y", or "Z"
+        col = {"X": 0, "Y": 1, "Z": 2}.get(axis_letter, 2)
+
+        vals = pts[:, col].astype(np.float64)
+        lo, hi = vals.min(), vals.max()
+        rng = hi - lo
+        if rng < 1e-12:
+            t = np.full(len(pts), 0.5)
+        else:
+            t = (vals - lo) / rng
+
+        if flip:
+            t = 1.0 - t
+
+        c = np.empty((len(pts), 3), dtype=np.float64)
+        c[:, 0] = np.clip(2 * t - 1, 0, 1)       # red
+        c[:, 1] = 1 - np.abs(2 * t - 1)           # green
+        c[:, 2] = np.clip(1 - 2 * t, 0, 1)        # blue
+        return c
 
     # ── point cloud ──────────────────────────────────────────────
 
@@ -166,10 +201,11 @@ class Viewport(QWidget):
         if layer.points is None or len(layer.points) == 0:
             return []
         n = len(layer.points)
-        colors = self._base_colors_pc(layer)
+        colors = self._resolve_pc_colors(layer)
+        ps = layer.render_props.get("point_size", 2)
 
         if not layer.mask_groups:
-            return [self._make_pc_actor(layer.points, colors)]
+            return [self._make_pc_actor(layer.points, colors, ps)]
 
         visible = np.zeros(n, dtype=bool)
         any_mask = False
@@ -191,9 +227,10 @@ class Viewport(QWidget):
             visible[:] = True
         if not np.any(visible):
             return []
-        return [self._make_pc_actor(layer.points[visible], colors[visible])]
+        return [self._make_pc_actor(
+            layer.points[visible], colors[visible], ps)]
 
-    def _make_pc_actor(self, points, colors):
+    def _make_pc_actor(self, points, colors, point_size=2):
         vtk_pts = vtk.vtkPoints()
         arr = numpy_to_vtk(
             np.ascontiguousarray(points, dtype=np.float32),
@@ -220,7 +257,7 @@ class Viewport(QWidget):
 
         actor = vtk.vtkActor()
         actor.SetMapper(mapper)
-        actor.GetProperty().SetPointSize(2)
+        actor.GetProperty().SetPointSize(point_size)
         return actor
 
     # ── mesh ─────────────────────────────────────────────────────
@@ -231,7 +268,7 @@ class Viewport(QWidget):
             return []
         nv = len(layer.vertices)
         nf = len(layer.faces)
-        colors = self._base_colors_mesh(layer)
+        colors = self._resolve_mesh_colors(layer)
 
         if not layer.mask_groups:
             return [self._make_mesh_actor(
