@@ -17,6 +17,10 @@ def load_file(filepath: str):
         except Exception:
             pass
 
+    # Handle txt files specially
+    if ext == "txt":
+        return _load_txt(filepath)
+
     # Fall back to point cloud
     pcd = o3d.io.read_point_cloud(filepath)
     if pcd.has_points() and len(pcd.points) > 0:
@@ -51,4 +55,34 @@ def _mesh_to_layer(mesh, filepath) -> MeshLayer:
         layer.vertex_colors = np.asarray(mesh.vertex_colors, dtype=np.float64)
     if mesh.has_vertex_normals():
         layer.vertex_normals = np.asarray(mesh.vertex_normals, dtype=np.float64)
+    return layer
+
+
+def _load_txt(filepath: str) -> PointCloudLayer:
+    """Load a point cloud from a TXT file (space/comma separated x y z [r g b])."""
+    # Read first line to detect delimiter
+    with open(filepath, 'r') as f:
+        first_line = f.readline().strip()
+    
+    if ',' in first_line:
+        delimiter = ','
+    else:
+        delimiter = None  # whitespace
+    
+    data = np.loadtxt(filepath, delimiter=delimiter)
+    if data.ndim == 1:
+        data = data.reshape(1, -1)
+    points = data[:, :3].astype(np.float64)
+    name = os.path.splitext(os.path.basename(filepath))[0]
+    layer = PointCloudLayer(
+        name=name,
+        points=points,
+        source_path=filepath,
+    )
+    if data.shape[1] >= 6:  # Assume r g b after x y z
+        colors = data[:, 3:6].astype(np.float64)
+        # Normalize if >1
+        if np.any(colors > 1):
+            colors /= 255.0
+        layer.colors = colors
     return layer

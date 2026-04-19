@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
     def _open(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Open", "",
-            "Supported (*.ply *.pcd *.obj *.stl *.xyz);;All (*)")
+            "Supported (*.ply *.pcd *.obj *.stl *.xyz *.txt);;All (*)")
         if not path:
             return
         try:
@@ -161,10 +161,10 @@ class MainWindow(QMainWindow):
         if isinstance(layer, PointCloudLayer):
             path, filt = QFileDialog.getSaveFileName(
                 self, "Export Point Cloud", base + ".ply",
-                "PLY binary (*.ply);;PLY ASCII (*.ply)")
+                "PLY binary (*.ply);;PLY ASCII (*.ply);;XYZ (*.xyz);;TXT (*.txt)")
             if not path:
                 return
-            binary = "ASCII" not in filt
+            binary = "ASCII" not in filt and not path.endswith(".txt") and not path.endswith(".xyz")
             try:
                 export_point_cloud(layer, path, sname, binary)
                 n = layer.point_count

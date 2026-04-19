@@ -16,16 +16,19 @@ def export_point_cloud(layer: PointCloudLayer, path: str,
         colors = layer.colors
         normals = layer.normals
 
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    if colors is not None:
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-    if normals is not None:
-        pcd.normals = o3d.utility.Vector3dVector(normals)
+    if path.lower().endswith('.txt'):
+        _export_txt(points, colors, normals, path)
+    else:
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        if colors is not None:
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+        if normals is not None:
+            pcd.normals = o3d.utility.Vector3dVector(normals)
 
-    o3d.io.write_point_cloud(path, pcd,
-                             write_ascii=not binary,
-                             print_progress=False)
+        o3d.io.write_point_cloud(path, pcd,
+                                 write_ascii=not binary,
+                                 print_progress=False)
 
 
 def export_mesh(layer: MeshLayer, path: str,
@@ -62,3 +65,11 @@ def export_mesh(layer: MeshLayer, path: str,
     o3d.io.write_triangle_mesh(path, mesh,
                                write_ascii=not binary,
                                print_progress=False)
+
+
+def _export_txt(points, colors, normals, path):
+    """Export point cloud to TXT format (space separated x y z [r g b])."""
+    data = points
+    if colors is not None:
+        data = np.hstack([points, colors])
+    np.savetxt(path, data, fmt='%.6f')
