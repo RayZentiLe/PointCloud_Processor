@@ -1,3 +1,4 @@
+import os
 import sys
 import traceback
 import numpy as np
@@ -164,7 +165,20 @@ class MainWindow(QMainWindow):
                 "PLY binary (*.ply);;PLY ASCII (*.ply);;XYZ (*.xyz);;TXT (*.txt)")
             if not path:
                 return
-            binary = "ASCII" not in filt and not path.endswith(".txt") and not path.endswith(".xyz")
+
+            # Ensure the chosen filter extension is reflected in the file path.
+            if "TXT" in filt:
+                desired_ext = ".txt"
+            elif "XYZ" in filt:
+                desired_ext = ".xyz"
+            else:
+                desired_ext = ".ply"
+
+            root, ext = os.path.splitext(path)
+            if ext.lower() != desired_ext:
+                path = root + desired_ext
+
+            binary = "ASCII" not in filt and desired_ext not in (".txt", ".xyz")
             try:
                 export_point_cloud(layer, path, sname, binary)
                 n = layer.point_count
