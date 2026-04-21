@@ -16,7 +16,7 @@ class Viewport(QWidget):
         super().__init__(parent)
         self.layer_manager = layer_manager
         self._actors: dict[str, list[vtk.vtkActor]] = {}
-        self._bg_color = (0.0, 0.0, 0.0)
+        self._bg_color = (255.0, 255.0, 255.0)  # Default to white background
         self._right_press_pos = None
 
         layout = QVBoxLayout(self)
