@@ -31,7 +31,7 @@ def run_noise_removal(points, indices, total_count,
           file=sys.stderr)
     progress_cb(100)
 
-    return MaskGroup(
+    mg = MaskGroup(
         filter_name="noise_removal",
         mask=full_mask,
         positive_name="clean",
@@ -39,5 +39,12 @@ def run_noise_removal(points, indices, total_count,
         positive_visible=True,
         negative_visible=True,
         positive_color=None,
-        negative_color=(1.0, 0.6, 0.0),
+        negative_color=None,
     )
+    # Set default colors for display (can be changed by user)
+    mg.positive_color_mode = "solid"     # Green for clean by default
+    mg.negative_color_mode = "solid"     # Orange for noise by default
+    mg.positive_solid_color = (0.2, 0.8, 0.2)  # Green
+    mg.negative_solid_color = (1.0, 0.6, 0.0)  # Orange
+    
+    return mg

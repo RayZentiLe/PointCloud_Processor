@@ -54,6 +54,12 @@ def run_mesh_filter(vertices, faces, face_indices, total_face_count,
         positive_visible=True,
         negative_visible=True,
         positive_color=None,
-        negative_color=(1.0, 0.5, 0.0),
+        negative_color=None,
     )
+    # Set default colors for display (can be changed by user)
+    mg.positive_color_mode = "solid"     # Green for largest by default
+    mg.negative_color_mode = "solid"     # Orange for small components by default
+    mg.positive_solid_color = (0.2, 0.8, 0.2)  # Green
+    mg.negative_solid_color = (1.0, 0.5, 0.0)  # Orange
+    
     return mg, n_components, largest_count, small_count

@@ -249,19 +249,35 @@ class Viewport(QWidget):
             if mg.positive_visible:
                 pos_idx = mg.mask
                 visible |= pos_idx
-                if mg.positive_color is not None:
-                    colors[pos_idx] = mg.positive_color
+                # Apply mask color based on color_mode
+                colors = self._apply_mask_color_pc(colors, pos_idx, mg, True)
             if mg.negative_visible:
                 neg_idx = ~mg.mask
                 visible |= neg_idx
-                if mg.negative_color is not None:
-                    colors[neg_idx] = mg.negative_color
+                # Apply mask color based on color_mode
+                colors = self._apply_mask_color_pc(colors, neg_idx, mg, False)
         if not any_mask:
             visible[:] = True
         if not np.any(visible):
             return []
         return [self._make_pc_actor(
             layer.points[visible], colors[visible], ps)]
+    
+    def _apply_mask_color_pc(self, colors, mask_idx, mask_group, is_positive):
+        """Apply mask colors to a point cloud color array based on color_mode."""
+        color_mode = (mask_group.positive_color_mode if is_positive 
+                      else mask_group.negative_color_mode)
+        solid_color = (mask_group.positive_solid_color if is_positive 
+                       else mask_group.negative_solid_color)
+        
+        if color_mode == "original":
+            # Keep parent color - no change needed
+            pass
+        elif color_mode == "solid":
+            # Apply solid color to masked indices
+            colors[mask_idx] = np.array(solid_color, dtype=np.float64)
+        
+        return colors
 
     def _make_pc_actor(self, points, colors, point_size=2):
         vtk_pts = vtk.vtkPoints()
@@ -315,14 +331,12 @@ class Viewport(QWidget):
             any_mask = True
             if mg.positive_visible:
                 face_vis |= mg.mask
-                if mg.positive_color is not None:
-                    vi = np.unique(layer.faces[mg.mask].ravel())
-                    colors[vi] = mg.positive_color
+                colors = self._apply_mask_color_mesh(
+                    colors, layer.faces, mg.mask, mg, True)
             if mg.negative_visible:
                 face_vis |= ~mg.mask
-                if mg.negative_color is not None:
-                    vi = np.unique(layer.faces[~mg.mask].ravel())
-                    colors[vi] = mg.negative_color
+                colors = self._apply_mask_color_mesh(
+                    colors, layer.faces, ~mg.mask, mg, False)
         if not any_mask:
             face_vis[:] = True
         if not np.any(face_vis):
@@ -335,6 +349,23 @@ class Viewport(QWidget):
 
         return [self._make_mesh_actor(
             layer.vertices[used], vmap[vis_faces], colors[used])]
+    
+    def _apply_mask_color_mesh(self, colors, faces, face_mask, mask_group, is_positive):
+        """Apply mask colors to a mesh color array based on color_mode."""
+        color_mode = (mask_group.positive_color_mode if is_positive 
+                      else mask_group.negative_color_mode)
+        solid_color = (mask_group.positive_solid_color if is_positive 
+                       else mask_group.negative_solid_color)
+        
+        if color_mode == "original":
+            # Keep parent color - no change needed
+            pass
+        elif color_mode == "solid":
+            # Apply solid color to vertices of masked faces
+            vi = np.unique(faces[face_mask].ravel())
+            colors[vi] = np.array(solid_color, dtype=np.float64)
+        
+        return colors
 
     def _make_mesh_actor(self, vertices, faces, colors):
         nv = len(vertices)

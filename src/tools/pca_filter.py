@@ -56,7 +56,7 @@ def run_pca_filter(points, indices, total_count,
     reject_n = int(total_count - kept_n)
     print(f"[PCA] Done: kept={kept_n}, rejected={reject_n}", file=sys.stderr)
 
-    return MaskGroup(
+    mg = MaskGroup(
         filter_name="pca_filter",
         mask=full_mask,
         positive_name="pca_kept",
@@ -64,5 +64,12 @@ def run_pca_filter(points, indices, total_count,
         positive_visible=True,
         negative_visible=True,
         positive_color=None,
-        negative_color=(1.0, 0.3, 0.3),
+        negative_color=None,
     )
+    # Set default colors for display (can be changed by user)
+    mg.positive_color_mode = "solid"     # Green for kept by default
+    mg.negative_color_mode = "solid"     # Red for rejected by default
+    mg.positive_solid_color = (0.2, 0.8, 0.2)  # Green
+    mg.negative_solid_color = (1.0, 0.3, 0.3)  # Red
+    
+    return mg

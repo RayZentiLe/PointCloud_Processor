@@ -167,6 +167,37 @@ class PropertiesPanel(QWidget):
         vl.addWidget(self.w_grad)
 
         root.addWidget(vis_grp)
+
+        # ── Mask Color Controls ──────────────────────────────────
+        mask_grp = QGroupBox("Mask Color")
+        mask_vl = QVBoxLayout(mask_grp)
+        mask_vl.setContentsMargins(8, 14, 8, 8)
+        mask_vl.setSpacing(6)
+
+        # --- mask color scheme combo ────────────────────────────
+        mask_cs_row = QHBoxLayout()
+        mask_cs_row.addWidget(QLabel("Color Mode:"))
+        self.cmb_mask_scheme = QComboBox()
+        self.cmb_mask_scheme.addItems(["Original", "Solid"])
+        mask_cs_row.addWidget(self.cmb_mask_scheme, 1)
+        mask_vl.addLayout(mask_cs_row)
+
+        # --- mask solid color controls ──────────────────────────
+        self.w_mask_solid = QWidget()
+        mask_sl = QHBoxLayout(self.w_mask_solid)
+        mask_sl.setContentsMargins(0, 4, 0, 0)
+        mask_sl.addWidget(QLabel("Pick color:"))
+        self.btn_mask_color = QPushButton("")
+        self.btn_mask_color.setMinimumHeight(26)
+        self._mask_solid_qc = QColor(200, 100, 100)
+        self._apply_mask_swatch()
+        mask_sl.addWidget(self.btn_mask_color, 1)
+        mask_vl.addWidget(self.w_mask_solid)
+
+        root.addWidget(mask_grp)
+        self.w_mask_grp = mask_grp
+        self.w_mask_grp.setVisible(False)
+
         root.addStretch(1)
 
     # ================================================================
@@ -185,6 +216,10 @@ class PropertiesPanel(QWidget):
         self.bg_mode.buttonClicked.connect(self._on_mode)
         self.sp_min.valueChanged.connect(self._on_grad_param)
         self.sp_max.valueChanged.connect(self._on_grad_param)
+        
+        # Mask color controls
+        self.cmb_mask_scheme.currentIndexChanged.connect(self._on_mask_scheme)
+        self.btn_mask_color.clicked.connect(self._on_pick_mask_color)
 
     # ================================================================
     #  REFRESH (model → UI)
@@ -193,6 +228,7 @@ class PropertiesPanel(QWidget):
     def _refresh(self):
         self._building = True
         layer = self.lm.get_selected_layer()
+        sublayer_name = self.lm.selected_sublayer_name
 
         if layer is None:
             for lbl in (self.lbl_name, self.lbl_type, self.lbl_count,
@@ -200,9 +236,20 @@ class PropertiesPanel(QWidget):
                 lbl.setText("—")
             self.w_solid.setVisible(False)
             self.w_grad.setVisible(False)
+            self.w_mask_grp.setVisible(False)
             self._building = False
             return
 
+        # Check if a sublayer (mask) is selected
+        if sublayer_name is not None:
+            self._refresh_sublayer(layer, sublayer_name)
+        else:
+            self._refresh_layer(layer)
+        
+        self._building = False
+    
+    def _refresh_layer(self, layer):
+        """Refresh UI for a regular layer (not a sublayer)."""
         # ── info labels ──────────────────────────────
         self.lbl_name.setText(layer.name)
 
@@ -268,7 +315,73 @@ class PropertiesPanel(QWidget):
             self.sp_max.setValue(self._auto_maxs[axis])
 
         self._update_visibility()
-        self._building = False
+        self.w_mask_grp.setVisible(False)
+    
+    def _refresh_sublayer(self, layer, sublayer_name):
+        """Refresh UI for a sublayer (mask)."""
+        # Find the mask group and determine if it's positive or negative
+        mg = None
+        is_positive = False
+        for mask_group in layer.mask_groups:
+            if mask_group.positive_name == sublayer_name:
+                mg = mask_group
+                is_positive = True
+                break
+            elif mask_group.negative_name == sublayer_name:
+                mg = mask_group
+                is_positive = False
+                break
+        
+        if mg is None:
+            self.w_mask_grp.setVisible(False)
+            return
+        
+        # Show layer info
+        self.lbl_name.setText(f"{layer.name} / {sublayer_name}")
+        if isinstance(layer, PointCloudLayer):
+            self.lbl_type.setText("Point Cloud (Sublayer)")
+            count = mg.positive_count if is_positive else mg.negative_count
+            self.lbl_count.setText(f"{count:,} points")
+        elif isinstance(layer, MeshLayer):
+            self.lbl_type.setText("Mesh (Sublayer)")
+            count = mg.positive_count if is_positive else mg.negative_count
+            self.lbl_count.setText(f"{count:,} faces")
+        
+        self.lbl_x.setText("—")
+        self.lbl_y.setText("—")
+        self.lbl_z.setText("—")
+        
+        # Hide layer-specific controls
+        self.w_solid.setVisible(False)
+        self.w_grad.setVisible(False)
+        self.sl_ps.blockSignals(True)
+        self.sl_ps.setValue(2)
+        self.sl_ps.blockSignals(False)
+
+        # Show and populate mask color controls
+        color_mode = (mg.positive_color_mode if is_positive 
+                      else mg.negative_color_mode)
+        solid_color = (mg.positive_solid_color if is_positive 
+                       else mg.negative_solid_color)
+        
+        # Set color mode combo
+        idx = self.cmb_mask_scheme.findText(color_mode.capitalize())
+        if idx < 0:
+            idx = 0  # Default to "Original"
+        self.cmb_mask_scheme.blockSignals(True)
+        self.cmb_mask_scheme.setCurrentIndex(idx)
+        self.cmb_mask_scheme.blockSignals(False)
+        
+        # Update color swatch
+        self._mask_solid_qc = QColor(
+            int(solid_color[0] * 255),
+            int(solid_color[1] * 255),
+            int(solid_color[2] * 255))
+        self._apply_mask_swatch()
+        
+        # Update visibility of solid color picker
+        self.w_mask_solid.setVisible(color_mode == "solid")
+        self.w_mask_grp.setVisible(True)
 
     # ================================================================
     #  UI HELPERS
@@ -282,6 +395,11 @@ class PropertiesPanel(QWidget):
     def _apply_swatch(self):
         self.btn_color.setStyleSheet(
             f"background-color: {self._solid_qc.name()}; "
+            f"border: 1px solid #888; min-height: 26px;")
+    
+    def _apply_mask_swatch(self):
+        self.btn_mask_color.setStyleSheet(
+            f"background-color: {self._mask_solid_qc.name()}; "
             f"border: 1px solid #888; min-height: 26px;")
 
     def _cur_axis_flip(self):
@@ -370,6 +488,82 @@ class PropertiesPanel(QWidget):
             layer.vis_gradient_min = self.sp_min.value()
             layer.vis_gradient_max = self.sp_max.value()
 
+        self._notify()
+
+    def _on_mask_scheme(self, _idx):
+        """Handle mask color mode change."""
+        if self._building:
+            return
+        
+        layer = self.lm.get_selected_layer()
+        sublayer_name = self.lm.selected_sublayer_name
+        
+        if layer is None or sublayer_name is None:
+            return
+        
+        # Find the mask group
+        mg = None
+        is_positive = False
+        for mask_group in layer.mask_groups:
+            if mask_group.positive_name == sublayer_name:
+                mg = mask_group
+                is_positive = True
+                break
+            elif mask_group.negative_name == sublayer_name:
+                mg = mask_group
+                is_positive = False
+                break
+        
+        if mg is None:
+            return
+        
+        color_mode = self.cmb_mask_scheme.currentText().lower()
+        if is_positive:
+            mg.positive_color_mode = color_mode
+        else:
+            mg.negative_color_mode = color_mode
+        
+        # Update visibility of solid color picker
+        self.w_mask_solid.setVisible(color_mode == "solid")
+        self._notify()
+
+    def _on_pick_mask_color(self):
+        """Handle mask solid color selection."""
+        c = QColorDialog.getColor(self._mask_solid_qc, self, "Mask Solid Color")
+        if not c.isValid():
+            return
+        
+        self._mask_solid_qc = c
+        self._apply_mask_swatch()
+        
+        layer = self.lm.get_selected_layer()
+        sublayer_name = self.lm.selected_sublayer_name
+        
+        if layer is None or sublayer_name is None:
+            return
+        
+        # Find the mask group
+        mg = None
+        is_positive = False
+        for mask_group in layer.mask_groups:
+            if mask_group.positive_name == sublayer_name:
+                mg = mask_group
+                is_positive = True
+                break
+            elif mask_group.negative_name == sublayer_name:
+                mg = mask_group
+                is_positive = False
+                break
+        
+        if mg is None:
+            return
+        
+        rgb = (c.redF(), c.greenF(), c.blueF())
+        if is_positive:
+            mg.positive_solid_color = rgb
+        else:
+            mg.negative_solid_color = rgb
+        
         self._notify()
 
     def _notify(self):

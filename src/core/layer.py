@@ -22,6 +22,18 @@ class MaskGroup:
         self.negative_name = negative_name
         self.positive_visible = positive_visible
         self.negative_visible = negative_visible
+        
+        # Color mode system (mirroring layer's system)
+        # "original" = inherit from parent layer
+        # "solid" = use fixed solid_color
+        # "gradient" = use gradient (future enhancement)
+        self.positive_color_mode = "original"    # "original" | "solid" | "gradient"
+        self.negative_color_mode = "original"
+        self.positive_solid_color = positive_color or (0.7, 0.7, 0.7)  # RGB 0-1
+        self.negative_solid_color = negative_color or (0.7, 0.7, 0.7)  # RGB 0-1
+        
+        # For backward compatibility, keep the old attributes
+        # but map them to the new system
         self.positive_color = positive_color
         self.negative_color = negative_color
 
