@@ -42,26 +42,29 @@ class MainWindow(QMainWindow):
 
         # left dock – layer tree
         self.layer_panel = LayerPanel(self.lm, self)
-        ld = QDockWidget("Layers", self)
-        ld.setWidget(self.layer_panel)
-        ld.setMinimumWidth(290)
-        self.addDockWidget(Qt.LeftDockWidgetArea, ld)
+        self.layers_dock = QDockWidget("Layers", self)
+        self.layers_dock.setWidget(self.layer_panel)
+        self.layers_dock.setMinimumWidth(290)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.layers_dock)
 
         # right dock – properties
         self.props_panel = PropertiesPanel(self.lm, self)
-        pd = QDockWidget("Properties", self)
-        pd.setWidget(self.props_panel)
-        pd.setMinimumWidth(260)
-        self.addDockWidget(Qt.RightDockWidgetArea, pd)
+        self.properties_dock = QDockWidget("Properties", self)
+        self.properties_dock.setWidget(self.props_panel)
+        self.properties_dock.setMinimumWidth(260)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.properties_dock)
 
         self.toolbar = Toolbar(self.lm, self)
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
 
         self.log = LogPanel(self)
-        logd = QDockWidget("Log", self)
-        logd.setWidget(self.log)
-        logd.setMaximumHeight(200)
-        self.addDockWidget(Qt.BottomDockWidgetArea, logd)
+        self.log_dock = QDockWidget("Log", self)
+        self.log_dock.setWidget(self.log)
+        self.log_dock.setMaximumHeight(200)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+
+        # Pass dock widgets to toolbar for Windows menu
+        self.toolbar.set_dock_widgets(self.layers_dock, self.properties_dock, self.log_dock)
 
         self.pbar = QProgressBar()
         self.pbar.setMaximumWidth(300)
@@ -90,6 +93,11 @@ class MainWindow(QMainWindow):
         lp.delete_requested.connect(self._delete_layer)
         lp.delete_mask_requested.connect(self._delete_mask)
         lp.camera_to_layer_requested.connect(self.viewport.focus_camera_on_layer)
+        
+        # Connect dock widget visibility changes to toolbar menu
+        self.layers_dock.visibilityChanged.connect(self._on_layers_visibility_changed)
+        self.properties_dock.visibilityChanged.connect(self._on_properties_visibility_changed)
+        self.log_dock.visibilityChanged.connect(self._on_log_visibility_changed)
 
     # ── helpers ──────────────────────────────────────────────────
 
