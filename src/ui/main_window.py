@@ -567,21 +567,23 @@ class MainWindow(QMainWindow):
         print(f"[MainWindow] Task FAILED: {msg}", file=sys.stderr)
         QMessageBox.critical(self, "Task Error", f"Task failed:\n\n{msg}")
 
-    def _connect(self):
-        tb = self.toolbar
-        tb.open_requested.connect(self._open)
-        tb.pca_requested.connect(self._run_pca)
-        tb.poisson_requested.connect(self._run_poisson)
-        tb.mesh_filter_requested.connect(self._run_mf)
-        tb.noise_removal_requested.connect(self._run_noise)
-        tb.export_requested.connect(self._export_sel)
-        tb.combine_requested.connect(self._combine_dlg)
+    # ── Panel visibility handlers ────────────────────────────────
 
-        lp = self.layer_panel
-        lp.export_requested.connect(self._export_layer)
-        lp.delete_requested.connect(self._delete_layer)
-        lp.delete_mask_requested.connect(self._delete_mask)
-        lp.camera_to_layer_requested.connect(self.viewport.focus_camera_on_layer)
+    def _on_layers_visibility_changed(self, visible):
+        """Update Windows menu when Layers panel visibility changes."""
+        self.toolbar.layers_action.blockSignals(True)
+        self.toolbar.layers_action.setChecked(visible)
+        self.toolbar.layers_action.blockSignals(False)
 
-        # ── rebuild VTK actors when visual properties change ──
+    def _on_properties_visibility_changed(self, visible):
+        """Update Windows menu when Properties panel visibility changes."""
+        self.toolbar.properties_action.blockSignals(True)
+        self.toolbar.properties_action.setChecked(visible)
+        self.toolbar.properties_action.blockSignals(False)
+
+    def _on_log_visibility_changed(self, visible):
+        """Update Windows menu when Log panel visibility changes."""
+        self.toolbar.log_action.blockSignals(True)
+        self.toolbar.log_action.setChecked(visible)
+        self.toolbar.log_action.blockSignals(False)
         self.props_panel.visual_changed.connect(self.viewport.rebuild_all)
