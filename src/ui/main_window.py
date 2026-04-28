@@ -39,6 +39,7 @@ class MainWindow(QMainWindow):
     def _build_ui(self):
         self.viewport = Viewport(self.lm, self)
         self.setCentralWidget(self.viewport)
+        self.set_app_font_size(12)  # Default to Medium size
 
         # left dock – layer tree
         self.layer_panel = LayerPanel(self.lm, self)
@@ -87,6 +88,7 @@ class MainWindow(QMainWindow):
         tb.noise_removal_requested.connect(self._run_noise)
         tb.export_requested.connect(self._export_sel)
         tb.combine_requested.connect(self._combine_dlg)
+        tb.font_size_changed.connect(self.set_app_font_size)  # Connect font size changes
 
         lp = self.layer_panel
         lp.export_requested.connect(self._export_layer)
@@ -587,3 +589,8 @@ class MainWindow(QMainWindow):
         self.toolbar.log_action.setChecked(visible)
         self.toolbar.log_action.blockSignals(False)
         self.props_panel.visual_changed.connect(self.viewport.rebuild_all)
+    
+    def set_app_font_size(self, size):
+        font = self.font()
+        font.setPointSize(size)
+        self.setFont(font)

@@ -10,6 +10,7 @@ class Toolbar(QToolBar):
     noise_removal_requested = Signal()
     export_requested = Signal()
     combine_requested = Signal()
+    font_size_changed = Signal(int)  # New signal for font size changes
 
     def __init__(self, layer_manager, parent=None):
         super().__init__("Main Toolbar", parent)
@@ -50,6 +51,11 @@ class Toolbar(QToolBar):
         self.log_action.setChecked(True)
         self.log_action.triggered.connect(self._toggle_log)
         
+        # Add font size submenu
+        menu.addSeparator()
+        font_menu = menu.addMenu("Font Size")
+        self._create_font_size_menu(font_menu)
+        
         # Add menu button
         menu_button = QToolButton(self)
         menu_button.setText("Windows")
@@ -85,3 +91,37 @@ class Toolbar(QToolBar):
         """Toggle Log panel visibility."""
         if 'log' in self.dock_widgets:
             self.dock_widgets['log'].setVisible(self.log_action.isChecked())
+
+    def _create_font_size_menu(self, font_menu):
+        """Create the font size submenu with size options."""
+        self.font_size_actions = {}
+        
+        # Font size options
+        sizes = [
+            ("Small", 10),
+            ("Medium", 12),
+            ("Large", 14),
+            ("Extra Large", 16)
+        ]
+        
+        for name, size in sizes:
+            action = font_menu.addAction(name)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, s=size: self._set_font_size(s))
+            self.font_size_actions[size] = action
+        
+        # Set default (Medium) as checked
+        self.font_size_actions[12].setChecked(True)
+
+    def _set_font_size(self, size):
+        """Set the font size and update action states."""
+        # Uncheck all actions
+        for action in self.font_size_actions.values():
+            action.setChecked(False)
+        
+        # Check the selected action
+        if size in self.font_size_actions:
+            self.font_size_actions[size].setChecked(True)
+        
+        # Emit the signal
+        self.font_size_changed.emit(size)
