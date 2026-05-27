@@ -33,6 +33,9 @@ pip install vtk
 pip install open3d
 pip install PyOpenGL PyOpenGL_accelerate
 
+sudo apt-get update && sudo apt-get install -y libgomp1
+sudo apt install -y libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-shape0 libxkbcommon-x11-0 libxcb-cursor0
+
 echo ""
 echo "============================================"
 echo "  Setup complete!"
