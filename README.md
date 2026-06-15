@@ -25,6 +25,19 @@ REM Then run
 run.bat pcprocessor
 ```
 
+or you can activate the environment directly using conda commands:
+
+```cmd
+# create a new environment
+conda env create -f environment.yml
+
+# activate environment
+conda activate pcprocessor
+
+# run the app
+run.bat pcprocessor
+```
+
 ### Linux setup
 From the repository root:
 
