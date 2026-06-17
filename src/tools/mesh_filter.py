@@ -5,7 +5,7 @@ from core.layer import MaskGroup
 
 
 def run_mesh_filter(vertices, faces, face_indices, total_face_count,
-                    progress_cb):
+                    progress_cb, cancel_cb):
     print(f"[MeshFilter] Starting: {len(vertices)} verts, {len(faces)} faces, "
           f"subset={face_indices is not None}", file=sys.stderr)
 

@@ -5,7 +5,7 @@ from core.layer import MeshLayer
 
 
 def run_poisson(points, colors, depth, scale,
-                density_quantile, linear_fit, progress_cb):
+                density_quantile, linear_fit, progress_cb, cancel_cb):
     print(f"[Poisson] Starting: {len(points)} points, depth={depth}, "
           f"scale={scale}, dq={density_quantile}", file=sys.stderr)
 

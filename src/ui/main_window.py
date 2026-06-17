@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 import traceback
 import numpy as np
 from PySide6.QtWidgets import (
@@ -16,6 +17,7 @@ from ui.layer_panel import LayerPanel
 from ui.properties_panel import PropertiesPanel
 from ui.toolbar import Toolbar
 from ui.log_panel import LogPanel
+from ui.dialogs.loading_dialog import LoadingDialog
 from io_utils.ply_io import load_file
 from io_utils.exporter import export_point_cloud, export_mesh
 from workers.task_runner import TaskRunner
@@ -29,6 +31,7 @@ class MainWindow(QMainWindow):
 
         self.lm = LayerManager(self)
         self._worker: TaskRunner | None = None
+        self._loading_dialog: LoadingDialog | None = None
 
         self._build_ui()
         self._build_menus()
@@ -273,7 +276,9 @@ class MainWindow(QMainWindow):
                          radius=p["radius"], threshold=p["threshold"],
                          k_neighbors=p["k_neighbors"],
                          chunk_size=p["chunk_size"],
-                         on_done=lambda r, _lid=lid: self._pca_done(_lid, r))
+                         on_done=lambda r, _lid=lid: self._pca_done(_lid, r),
+                         loading_title="PCA Filter",
+                         loading_message=f"Processing PCA on {layer.name}...")
 
         except Exception as e:
             msg = f"PCA setup error: {e}\n{traceback.format_exc()}"
@@ -281,6 +286,10 @@ class MainWindow(QMainWindow):
             print(msg, file=sys.stderr)
 
     def _pca_done(self, lid, mg):
+        if mg is None:
+            # Task was cancelled
+            self.log.log("PCA Filter: cancelled by user.")
+            return
         self.lm.add_mask_group(lid, mg)
         self.log.log(
             f"PCA Filter complete: {mg.positive_count:,} kept, "
@@ -533,10 +542,12 @@ class MainWindow(QMainWindow):
 
     # ── task runner ──────────────────────────────────────────────
 
-    def _launch(self, func, on_done, **kw):
+    def _launch(self, func, on_done, loading_title="Processing", 
+                loading_message="Please wait...", **kw):
         if self._worker and self._worker.isRunning():
             QMessageBox.warning(self, "Busy", "A task is already running.")
             return
+        
         self.pbar.setVisible(True)
         self.pbar.setValue(0)
         self.toolbar.setEnabled(False)
@@ -544,17 +555,34 @@ class MainWindow(QMainWindow):
         print(f"[MainWindow] Launching worker: {func.__name__}",
               file=sys.stderr)
 
+        # Create and show loading dialog
+        self._loading_dialog = LoadingDialog(loading_title, loading_message, self)
+        self._loading_dialog.show()
+
         self._worker = TaskRunner(func, **kw)
-        self._worker.progress.connect(self.pbar.setValue)
+        self._worker.progress.connect(self._on_worker_progress)
         self._worker.finished_result.connect(
             lambda r, _cb=on_done: self._task_ok(r, _cb))
+        self._worker.cancelled.connect(self._task_cancelled)
         self._worker.error.connect(self._task_err)
+        
+        # Connect cancel button to worker cancellation
+        self._loading_dialog.cancel_clicked.connect(self._worker.request_cancel)
+        
         self._worker.start()
 
+    def _on_worker_progress(self, value):
+        """Update both progress bar and loading dialog."""
+        self.pbar.setValue(value)
+        if self._loading_dialog:
+            self._loading_dialog.set_progress(value)
+
     def _task_ok(self, result, cb):
+        self._close_loading_dialog()
         self.pbar.setVisible(False)
         self.toolbar.setEnabled(True)
         print(f"[MainWindow] Task finished OK", file=sys.stderr)
+        gc.collect()  # Force garbage collection to release RAM
         try:
             cb(result)
         except Exception as e:
@@ -562,12 +590,29 @@ class MainWindow(QMainWindow):
             self.log.log(f"ERROR: {msg}")
             print(msg, file=sys.stderr)
 
+    def _task_cancelled(self):
+        """Handle task cancellation."""
+        self._close_loading_dialog()
+        self.pbar.setVisible(False)
+        self.toolbar.setEnabled(True)
+        print(f"[MainWindow] Task cancelled by user", file=sys.stderr)
+        gc.collect()  # Force garbage collection to release RAM
+        self.log.log("Task cancelled by user.")
+
     def _task_err(self, msg):
+        self._close_loading_dialog()
         self.pbar.setVisible(False)
         self.toolbar.setEnabled(True)
         self.log.log(f"ERROR: {msg}")
         print(f"[MainWindow] Task FAILED: {msg}", file=sys.stderr)
+        gc.collect()  # Force garbage collection to release RAM
         QMessageBox.critical(self, "Task Error", f"Task failed:\n\n{msg}")
+
+    def _close_loading_dialog(self):
+        """Close and cleanup the loading dialog."""
+        if self._loading_dialog:
+            self._loading_dialog.close()
+            self._loading_dialog = None
 
     # ── Panel visibility handlers ────────────────────────────────
 

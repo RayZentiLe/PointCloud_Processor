@@ -1,4 +1,5 @@
 import sys
+import gc
 import numpy as np
 from scipy.spatial import cKDTree
 from core.layer import MaskGroup
@@ -6,7 +7,7 @@ from core.layer import MaskGroup
 
 def run_pca_filter(points, indices, total_count,
                    radius, threshold, k_neighbors,
-                   chunk_size, progress_cb):
+                   chunk_size, progress_cb, cancel_cb):
     print(f"[PCA] Starting: {len(points)} points, radius={radius}, "
           f"threshold={threshold}, k={k_neighbors}", file=sys.stderr)
 
@@ -26,6 +27,17 @@ def run_pca_filter(points, indices, total_count,
     print(f"[PCA] Processing {n_chunks} chunks...", file=sys.stderr)
 
     for ci, chunk_idx in enumerate(chunks):
+        # Check for cancellation
+        if cancel_cb():
+            print("[PCA] Cancellation requested, cleaning up...", file=sys.stderr)
+            # Clean up memory
+            del tree
+            del kept_local
+            del chunks
+            del chunk_idx
+            gc.collect()
+            return None
+
         chunk_pts = points[chunk_idx]
         neighborhoods = tree.query_ball_point(chunk_pts, radius)
 
@@ -55,6 +67,12 @@ def run_pca_filter(points, indices, total_count,
     kept_n = int(np.sum(full_mask))
     reject_n = int(total_count - kept_n)
     print(f"[PCA] Done: kept={kept_n}, rejected={reject_n}", file=sys.stderr)
+
+    # Clean up intermediate data
+    del tree
+    del kept_local
+    del chunks
+    gc.collect()
 
     mg = MaskGroup(
         filter_name="pca_filter",

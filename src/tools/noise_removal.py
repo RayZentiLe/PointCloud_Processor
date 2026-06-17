@@ -5,7 +5,7 @@ from core.layer import MaskGroup
 
 
 def run_noise_removal(points, indices, total_count,
-                      mesh_vertices, threshold, progress_cb):
+                      mesh_vertices, threshold, progress_cb, cancel_cb):
     print(f"[NoiseRemoval] Starting: {len(points)} points, "
           f"{len(mesh_vertices)} mesh verts, threshold={threshold}",
           file=sys.stderr)
