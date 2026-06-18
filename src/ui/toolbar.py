@@ -8,6 +8,7 @@ class Toolbar(QToolBar):
     poisson_requested = Signal()
     mesh_filter_requested = Signal()
     noise_removal_requested = Signal()
+    cross_section_requested = Signal()
     export_requested = Signal()
     combine_requested = Signal()
     font_size_changed = Signal(int)  # New signal for font size changes
@@ -23,6 +24,7 @@ class Toolbar(QToolBar):
         self.addAction("Poisson", self.poisson_requested.emit)
         self.addAction("Mesh Filter", self.mesh_filter_requested.emit)
         self.addAction("Noise Removal", self.noise_removal_requested.emit)
+        self.addAction("Cross Section", self.cross_section_requested.emit)
         self.addSeparator()
         self.addAction("Combine", self.combine_requested.emit)
         self.addAction("💾 Export", self.export_requested.emit)
@@ -46,6 +48,11 @@ class Toolbar(QToolBar):
         self.properties_action.setChecked(True)
         self.properties_action.triggered.connect(self._toggle_properties)
         
+        self.cross_section_action = menu.addAction("Cross Section")
+        self.cross_section_action.setCheckable(True)
+        self.cross_section_action.setChecked(False)
+        self.cross_section_action.triggered.connect(self._toggle_cross_section)
+        
         self.log_action = menu.addAction("Log")
         self.log_action.setCheckable(True)
         self.log_action.setChecked(True)
@@ -63,17 +70,21 @@ class Toolbar(QToolBar):
         menu_button.setPopupMode(QToolButton.InstantPopup)
         self.addWidget(menu_button)
 
-    def set_dock_widgets(self, layers_dock, properties_dock, log_dock):
+    def set_dock_widgets(self, layers_dock, properties_dock, log_dock, cross_section_dock=None):
         """Set the dock widget references for panel toggling."""
         self.dock_widgets['layers'] = layers_dock
         self.dock_widgets['properties'] = properties_dock
         self.dock_widgets['log'] = log_dock
+        if cross_section_dock is not None:
+            self.dock_widgets['cross_section'] = cross_section_dock
         
         # Update checkbox states based on current visibility
         if 'layers' in self.dock_widgets:
             self.layers_action.setChecked(self.dock_widgets['layers'].isVisible())
         if 'properties' in self.dock_widgets:
             self.properties_action.setChecked(self.dock_widgets['properties'].isVisible())
+        if 'cross_section' in self.dock_widgets:
+            self.cross_section_action.setChecked(self.dock_widgets['cross_section'].isVisible())
         if 'log' in self.dock_widgets:
             self.log_action.setChecked(self.dock_widgets['log'].isVisible())
 
@@ -86,6 +97,11 @@ class Toolbar(QToolBar):
         """Toggle Properties panel visibility."""
         if 'properties' in self.dock_widgets:
             self.dock_widgets['properties'].setVisible(self.properties_action.isChecked())
+
+    def _toggle_cross_section(self):
+        """Toggle Cross Section panel visibility."""
+        if 'cross_section' in self.dock_widgets:
+            self.dock_widgets['cross_section'].setVisible(self.cross_section_action.isChecked())
 
     def _toggle_log(self):
         """Toggle Log panel visibility."""

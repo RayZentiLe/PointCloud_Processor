@@ -12,14 +12,16 @@ from PySide6.QtWidgets import QDialog
 
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
-from ui.viewport import Viewport
+# Import Viewport lazily in _build_ui to handle environments where VTK
+# cannot be imported (e.g. blocked by policy). A lightweight fallback
+# viewport will be used in that case to keep the UI functional.
 from ui.layer_panel import LayerPanel
 from ui.properties_panel import PropertiesPanel
 from ui.toolbar import Toolbar
 from ui.log_panel import LogPanel
 from ui.dialogs.loading_dialog import LoadingDialog
-from io_utils.ply_io import load_file
-from io_utils.exporter import export_point_cloud, export_mesh
+# Defer heavy I/O imports (open3d, exporters) until runtime to avoid
+# import-time failures in environments without those packages.
 from workers.task_runner import TaskRunner
 
 
@@ -40,7 +42,39 @@ class MainWindow(QMainWindow):
     # ── UI setup ─────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.viewport = Viewport(self.lm, self)
+        # Try to import the rich VTK-based viewport. If VTK is unavailable
+        # (import errors), fall back to a lightweight placeholder so the
+        # rest of the UI (docks, panels) can still be used.
+        try:
+            from ui.viewport import Viewport
+            self.viewport = Viewport(self.lm, self)
+        except Exception as e:
+            from PySide6.QtWidgets import QLabel
+            print(f"[MainWindow] Viewport import failed: {e}", file=sys.stderr)
+            class ViewportFallback(QLabel):
+                def __init__(self, *a, **k):
+                    super().__init__("Viewport unavailable: VTK import failed.\nCheck application logs.")
+                def fit_all(self):
+                    return
+                def focus_camera_on_layer(self, layer_id):
+                    return
+                def enable_cross_section_mode(self, layer):
+                    return
+                def disable_cross_section_mode(self):
+                    return
+                def set_cross_section_pick_mode(self, mode):
+                    return
+                def set_cross_section_direction_confirmed(self, confirmed):
+                    return
+                def clear_cross_section_direction_points(self):
+                    return
+                def clear_cross_section_reference_point(self):
+                    return
+                def get_cross_section_state(self):
+                    return {"active": False, "layer_id": None, "direction_points": [], "reference_point": None, "direction_xy": None, "thickness": 1.0, "mode": "none"}
+
+            self.viewport = ViewportFallback()
+
         self.setCentralWidget(self.viewport)
         self.set_app_font_size(12)  # Default to Medium size
 
@@ -58,6 +92,16 @@ class MainWindow(QMainWindow):
         self.properties_dock.setMinimumWidth(260)
         self.addDockWidget(Qt.RightDockWidgetArea, self.properties_dock)
 
+        # right dock – cross section
+        from ui.cross_section_panel import CrossSectionPanel
+        self.cross_section_panel = CrossSectionPanel(self.viewport, self.lm, self)
+        self.cross_section_panel.cross_section_created.connect(self._on_cross_section_created)
+        self.cross_section_dock = QDockWidget("Cross Section", self)
+        self.cross_section_dock.setWidget(self.cross_section_panel)
+        self.cross_section_dock.setMinimumWidth(320)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.cross_section_dock)
+        self.cross_section_dock.setVisible(False)
+
         self.toolbar = Toolbar(self.lm, self)
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
 
@@ -67,8 +111,8 @@ class MainWindow(QMainWindow):
         self.log_dock.setMaximumHeight(200)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
 
-        # Pass dock widgets to toolbar for Windows menu
-        self.toolbar.set_dock_widgets(self.layers_dock, self.properties_dock, self.log_dock)
+        # Pass dock widgets to toolbar for Windows menu (include cross section)
+        self.toolbar.set_dock_widgets(self.layers_dock, self.properties_dock, self.log_dock, self.cross_section_dock)
 
         self.pbar = QProgressBar()
         self.pbar.setMaximumWidth(300)
@@ -91,6 +135,7 @@ class MainWindow(QMainWindow):
         tb.noise_removal_requested.connect(self._run_noise)
         tb.export_requested.connect(self._export_sel)
         tb.combine_requested.connect(self._combine_dlg)
+        tb.cross_section_requested.connect(self._show_cross_section_panel)
         tb.font_size_changed.connect(self.set_app_font_size)  # Connect font size changes
 
         lp = self.layer_panel
@@ -102,7 +147,9 @@ class MainWindow(QMainWindow):
         # Connect dock widget visibility changes to toolbar menu
         self.layers_dock.visibilityChanged.connect(self._on_layers_visibility_changed)
         self.properties_dock.visibilityChanged.connect(self._on_properties_visibility_changed)
+        self.cross_section_dock.visibilityChanged.connect(self._on_cross_section_visibility_changed)
         self.log_dock.visibilityChanged.connect(self._on_log_visibility_changed)
+        self.lm.selection_changed.connect(self.on_layer_selected)
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -141,6 +188,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
+            from io_utils.ply_io import load_file
             layer = load_file(path)
             if isinstance(layer, PointCloudLayer):
                 self.lm.add_point_cloud(layer)
@@ -193,6 +241,7 @@ class MainWindow(QMainWindow):
 
             binary = "ASCII" not in filt and desired_ext not in (".txt", ".xyz")
             try:
+                from io_utils.exporter import export_point_cloud
                 export_point_cloud(layer, path, sname, binary)
                 n = layer.point_count
                 if sname:
@@ -209,6 +258,7 @@ class MainWindow(QMainWindow):
                 return
             binary = "ASCII" not in filt and not path.endswith(".obj")
             try:
+                from io_utils.exporter import export_mesh
                 export_mesh(layer, path, sname, binary)
                 self.log.log(f"Exported mesh → {path}")
             except Exception as e:
@@ -608,6 +658,50 @@ class MainWindow(QMainWindow):
         gc.collect()  # Force garbage collection to release RAM
         QMessageBox.critical(self, "Task Error", f"Task failed:\n\n{msg}")
 
+    def _show_cross_section_panel(self):
+        layer = self._get_or_pick_pc()
+        if layer is None:
+            QMessageBox.information(
+                self, "Cross Section",
+                "Select a point cloud first.\n\n"
+                "Click on a point cloud in the Layers panel, then open the Cross Section panel.")
+            return
+
+        self.cross_section_dock.setVisible(True)
+        self.cross_section_dock.raise_()
+
+    def _on_cross_section_created(self, new_layer):
+        from core.layer import MaskGroup
+
+        if isinstance(new_layer, MaskGroup):
+            layer = self.lm.get_selected_layer() or self._get_or_pick_pc()
+            if layer is None:
+                QMessageBox.warning(self, "Cross Section", "No point cloud selected to apply mask to.")
+                return
+            self.lm.add_mask_group(layer.id, new_layer)
+            self.log.log(
+                f"Cross Section mask added to: {layer.name} "
+                f"({new_layer.positive_count:,} kept, {new_layer.negative_count:,} rejected)")
+            self.viewport.fit_all()
+            return
+
+        # fallback: a new layer was provided
+        try:
+            self.lm.add_point_cloud(new_layer)
+            self.lm.set_selection(new_layer.id)
+            self.log.log(
+                f"Cross Section created: {new_layer.name} "
+                f"({new_layer.point_count:,} pts)")
+            self.viewport.fit_all()
+        except Exception:
+            # ignore malformed input
+            return
+
+    def _on_cross_section_visibility_changed(self, visible):
+        self.toolbar.cross_section_action.blockSignals(True)
+        self.toolbar.cross_section_action.setChecked(visible)
+        self.toolbar.cross_section_action.blockSignals(False)
+
     def _close_loading_dialog(self):
         """Close and cleanup the loading dialog."""
         if self._loading_dialog:
@@ -639,3 +733,7 @@ class MainWindow(QMainWindow):
         font = self.font()
         font.setPointSize(size)
         self.setFont(font)
+        
+    def on_layer_selected(self, layer):
+        print("Layer selected:", layer)  # debug
+        self.cross_section_panel.set_current_layer(layer)

@@ -3,7 +3,7 @@ import numpy as np
 import vtk
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from PySide6.QtCore import Qt, QEvent, QPoint
+from PySide6.QtCore import Qt, QEvent, QPoint, Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QColorDialog, QMenu
 from PySide6.QtGui import QColor
 from tools.gradient_colors import compute_gradient_colors
@@ -12,12 +12,30 @@ from core.layer import PointCloudLayer, MeshLayer
 
 
 class Viewport(QWidget):
+    cross_section_point_selected = Signal(object)
+
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
         self.layer_manager = layer_manager
         self._actors: dict[str, list[vtk.vtkActor]] = {}
         self._bg_color = (255.0, 255.0, 255.0)  # Default to white background
         self._right_press_pos = None
+        self._picker = vtk.vtkPointPicker()
+        self._cross_section_active = False
+        self._cross_section_layer_id: str | None = None
+        self._cross_section_points: list[np.ndarray] = []
+        self._cross_section_reference: np.ndarray | None = None
+        self._cross_section_direction_xy: np.ndarray | None = None
+        self._cross_section_pick_mode = "direction"
+        self._cross_section_line_actor = None
+        self._cross_section_confirmed_line_actor = None  # Green line when confirmed
+        self._cross_section_polyline_actor = None  # Polyline connecting all confirmed points
+        self._cross_section_point_actors: list[vtk.vtkActor] = []
+        self._cross_section_ref_actor = None
+        self._cross_section_reference_projection_actor = None
+        self._cross_section_reference_line_actor = None
+        self._cross_section_thickness = 1.0
+        self._cross_section_direction_confirmed = False  # Track confirmation state
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -59,12 +77,29 @@ class Viewport(QWidget):
         self.vtk_widget.Initialize()
         self.vtk_widget.Start()
 
+        interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
+        interactor.AddObserver("LeftButtonPressEvent", self._on_left_button_press)
+
+
+    def _on_left_button_press(self, obj, event):
+        x, y = obj.GetEventPosition()
+
+        print("Mouse click at:", x, y)  # debug
+
+        self._handle_cross_section_pick(x, y)
+
+        obj.OnLeftButtonDown()
+
     # ── event filter (right-click → background color picker) ─────
 
     def eventFilter(self, obj, event):
         if obj is self.vtk_widget:
             etype = event.type()
             if etype == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton and self._cross_section_active:
+                    pos = event.position().toPoint()
+                    self._handle_cross_section_pick(pos.x(), pos.y())
+                    return True
                 if event.button() == Qt.MouseButton.RightButton:
                     self._right_press_pos = event.position().toPoint()
             elif etype == QEvent.Type.MouseButtonRelease:
@@ -95,6 +130,319 @@ class Viewport(QWidget):
             self.renderer.SetBackground(*self._bg_color)
             self.renderer.GradientBackgroundOff()
             self._render()
+
+    def enable_cross_section_mode(self, layer):
+        if self._cross_section_active and self._cross_section_layer_id == layer.id:
+            self._cross_section_pick_mode = "direction"
+            self._render()
+            return
+
+        self._cross_section_active = True
+        self._cross_section_layer_id = layer.id
+        self._cross_section_points.clear()
+        self._cross_section_reference = None
+        self._cross_section_direction_xy = None
+        self._cross_section_pick_mode = "direction"
+        self._cross_section_direction_confirmed = False
+        self._remove_cross_section_actors()
+        self._render()
+
+    def disable_cross_section_mode(self):
+        self._cross_section_active = False
+        self._cross_section_layer_id = None
+        self._cross_section_points.clear()
+        self._cross_section_reference = None
+        self._cross_section_direction_xy = None
+        self._cross_section_pick_mode = "direction"
+        self._cross_section_direction_confirmed = False
+        self._remove_cross_section_actors()
+        self._render()
+
+    def set_cross_section_pick_mode(self, mode):
+        if mode in ("direction", "reference", "none"):
+            self._cross_section_pick_mode = mode
+            self._render()
+
+    def set_cross_section_thickness(self, value):
+        self._cross_section_thickness = float(value)
+
+    def set_cross_section_direction_confirmed(self, confirmed):
+        """Set whether the direction points are confirmed (locked)."""
+        self._cross_section_direction_confirmed = confirmed
+        self._update_cross_section_preview()
+        self._render()
+
+    def clear_cross_section_direction_points(self):
+        self._cross_section_points.clear()
+        self._cross_section_direction_xy = None
+        self._remove_cross_section_actors(point_actors=True, line_actor=True)
+        self._render()
+
+    def clear_cross_section_reference_point(self):
+        self._cross_section_reference = None
+        if self._cross_section_ref_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_ref_actor)
+            self._cross_section_ref_actor = None
+        if self._cross_section_reference_projection_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_reference_projection_actor)
+            self._cross_section_reference_projection_actor = None
+        if self._cross_section_reference_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_reference_line_actor)
+            self._cross_section_reference_line_actor = None
+        self._render()
+
+    def get_cross_section_state(self):
+        return {
+            "active": self._cross_section_active,
+            "layer_id": self._cross_section_layer_id,
+            "direction_points": list(self._cross_section_points),
+            "reference_point": self._cross_section_reference,
+            "direction_xy": self._cross_section_direction_xy,
+            "thickness": self._cross_section_thickness,
+            "mode": self._cross_section_pick_mode,
+        }
+
+    def _handle_cross_section_pick(self, x, y):
+        if not self._cross_section_active:
+            return
+        if self._picker.Pick(x, self.vtk_widget.height() - y, 0, self.renderer) == 0:
+            return
+        point = np.asarray(self._picker.GetPickPosition(), dtype=np.float64)
+        point_id = self._picker.GetPointId()
+        if point_id < 0:
+            return
+
+        if self._cross_section_pick_mode == "direction":
+            # Don't allow picking more direction points if already confirmed
+            if self._cross_section_direction_confirmed:
+                return
+            self._cross_section_points.append(point)
+            # Bigger cyan spheres for selected points
+            actor = self._make_sphere_actor(point, radius=0.03, color=(0.0, 1.0, 1.0))
+            self._cross_section_point_actors.append(actor)
+            self.renderer.AddActor(actor)
+            self._update_cross_section_preview()
+            self.cross_section_point_selected.emit({"mode": "direction", "point": point})
+        elif self._cross_section_pick_mode == "reference":
+            self._cross_section_reference = point
+            if self._cross_section_ref_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_ref_actor)
+            self._cross_section_ref_actor = self._make_sphere_actor(point, radius=0.015, color=(1.0, 0.2, 0.2))
+            self.renderer.AddActor(self._cross_section_ref_actor)
+            self._update_cross_section_reference_markers()
+            self._render()
+            self.cross_section_point_selected.emit({"mode": "reference", "point": point})
+
+    def _update_cross_section_preview(self):
+        # Remove preview line
+        if self._cross_section_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_line_actor)
+            self._cross_section_line_actor = None
+
+        # Remove confirmed line
+        if self._cross_section_confirmed_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_confirmed_line_actor)
+            self._cross_section_confirmed_line_actor = None
+
+        # Remove polyline if any
+        if self._cross_section_polyline_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_polyline_actor)
+            self._cross_section_polyline_actor = None
+
+        if len(self._cross_section_points) < 2:
+            self._cross_section_direction_xy = None
+            self._render()
+            return
+
+        points = np.asarray(self._cross_section_points, dtype=np.float64)
+        xy = points[:, :2]
+        mean_xy = xy.mean(axis=0)
+        u, s, vh = np.linalg.svd(xy - mean_xy)
+        direction_xy = vh[0]
+        if np.linalg.norm(direction_xy) == 0:
+            return
+        direction_xy = direction_xy / np.linalg.norm(direction_xy)
+        if direction_xy[0] < 0:
+            direction_xy = -direction_xy
+        self._cross_section_direction_xy = direction_xy
+
+        layer = self.layer_manager.get_layer(self._cross_section_layer_id)
+        if layer is None or len(layer.points) == 0:
+            zmin = 0.0
+            zmax = 1.0
+            span = 1.0
+        else:
+            zmin = float(np.min(layer.points[:, 2]))
+            zmax = float(np.max(layer.points[:, 2]))
+            span = float(np.linalg.norm(layer.points[:, :2].ptp(axis=0)))
+        span = max(span, 1.0)
+        line_length = span * 1.5
+
+        z0 = float(np.mean(points[:, 2])) if self._cross_section_reference is None else float(self._cross_section_reference[2])
+        start = np.array([mean_xy[0] - direction_xy[0] * line_length,
+                          mean_xy[1] - direction_xy[1] * line_length,
+                          zmin])
+        end = np.array([mean_xy[0] + direction_xy[0] * line_length,
+                        mean_xy[1] + direction_xy[1] * line_length,
+                        zmax])
+
+        # Show the normal direction line from the fit
+        if self._cross_section_direction_confirmed:
+            self._cross_section_line_actor = self._make_line_actor(
+                start, end, color=(0.0, 1.0, 0.0), width=6)
+            self.renderer.AddActor(self._cross_section_line_actor)
+            # Also optionally draw the selected points polyline for context
+            self._cross_section_polyline_actor = self._make_polyline_actor(
+                points, color=(0.0, 0.7, 0.7), width=2)
+            if self._cross_section_polyline_actor is not None:
+                self.renderer.AddActor(self._cross_section_polyline_actor)
+        else:
+            # Show yellow preview line through all points
+            self._cross_section_line_actor = self._make_line_actor(start, end, color=(1.0, 1.0, 0.0), width=4)
+            self.renderer.AddActor(self._cross_section_line_actor)
+
+        self._update_cross_section_reference_markers()
+        self._render()
+
+    def _update_cross_section_reference_markers(self):
+        if self._cross_section_reference is None:
+            return
+        if self._cross_section_direction_xy is None:
+            return
+        if len(self._cross_section_points) < 2:
+            return
+
+        # Compute closest point on the direction line (in XY) for the selected reference
+        points = np.asarray(self._cross_section_points, dtype=np.float64)
+        origin_xy = points[:, :2].mean(axis=0)
+        direction = self._cross_section_direction_xy
+        ref_xy = self._cross_section_reference[:2]
+        projected_xy = origin_xy + direction * np.dot(ref_xy - origin_xy, direction)
+        projected_point = np.array([
+            projected_xy[0], projected_xy[1], float(self._cross_section_reference[2])
+        ], dtype=np.float64)
+
+        if self._cross_section_reference_projection_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_reference_projection_actor)
+            self._cross_section_reference_projection_actor = None
+        if self._cross_section_reference_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_reference_line_actor)
+            self._cross_section_reference_line_actor = None
+
+        self._cross_section_reference_projection_actor = self._make_sphere_actor(
+            projected_point, radius=0.02, color=(1.0, 0.0, 1.0)
+        )
+        self.renderer.AddActor(self._cross_section_reference_projection_actor)
+        self._cross_section_reference_line_actor = self._make_line_actor(
+            self._cross_section_reference, projected_point,
+            color=(1.0, 0.2, 1.0), width=2
+        )
+        self.renderer.AddActor(self._cross_section_reference_line_actor)
+
+    def _remove_cross_section_actors(self, point_actors=False, line_actor=False, ref_actor=False):
+        if not any((point_actors, line_actor, ref_actor)):
+            point_actors = line_actor = ref_actor = True
+
+        if point_actors:
+            for actor in self._cross_section_point_actors:
+                self.renderer.RemoveActor(actor)
+            self._cross_section_point_actors.clear()
+
+        if line_actor:
+            if self._cross_section_line_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_line_actor)
+                self._cross_section_line_actor = None
+            if self._cross_section_confirmed_line_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_confirmed_line_actor)
+                self._cross_section_confirmed_line_actor = None
+            if self._cross_section_polyline_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_polyline_actor)
+                self._cross_section_polyline_actor = None
+
+        if ref_actor and self._cross_section_ref_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_ref_actor)
+            self._cross_section_ref_actor = None
+        if self._cross_section_reference_projection_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_reference_projection_actor)
+            self._cross_section_reference_projection_actor = None
+        if self._cross_section_reference_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_reference_line_actor)
+            self._cross_section_reference_line_actor = None
+
+    def _make_line_actor(self, start, end, color=(1.0, 1.0, 0.0), width=2):
+        pts = vtk.vtkPoints()
+        pts.InsertNextPoint(*start.tolist())
+        pts.InsertNextPoint(*end.tolist())
+
+        line = vtk.vtkLine()
+        line.GetPointIds().SetId(0, 0)
+        line.GetPointIds().SetId(1, 1)
+
+        lines = vtk.vtkCellArray()
+        lines.InsertNextCell(line)
+
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(pts)
+        poly.SetLines(lines)
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly)
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetLineWidth(width)
+        actor.GetProperty().SetOpacity(0.9)
+        return actor
+
+    def _make_sphere_actor(self, center, radius=0.01, color=(1.0, 1.0, 0.0)):
+        sphere = vtk.vtkSphereSource()
+        sphere.SetCenter(*center.tolist())
+        sphere.SetRadius(radius)
+        sphere.SetThetaResolution(16)
+        sphere.SetPhiResolution(16)
+        sphere.Update()
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputConnection(sphere.GetOutputPort())
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetOpacity(0.8)
+        return actor
+
+    def _make_polyline_actor(self, points_list, color=(0.0, 1.0, 0.0), width=4):
+        """Create a polyline connecting all points in order."""
+        if len(points_list) < 2:
+            return None
+        
+        pts = vtk.vtkPoints()
+        for pt in points_list:
+            pts.InsertNextPoint(*pt.tolist())
+        
+        # Create polyline (connected line segments)
+        polyline = vtk.vtkPolyLine()
+        polyline.GetPointIds().SetNumberOfIds(len(points_list))
+        for i in range(len(points_list)):
+            polyline.GetPointIds().SetId(i, i)
+        
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(polyline)
+        
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(pts)
+        poly.SetLines(cells)
+        
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly)
+        
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetLineWidth(width)
+        actor.GetProperty().SetOpacity(0.9)
+        return actor
 
     # ── public ───────────────────────────────────────────────────
 
