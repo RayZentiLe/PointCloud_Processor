@@ -9,6 +9,10 @@ PointCloud Processor is a desktop application for loading, viewing, filtering, a
 - Python 3.11 environment
 - Required Python packages: `numpy`, `scipy`, `PySide6`, `vtk`, `open3d`, `PyOpenGL`, `PyOpenGL_accelerate`
 
+> Note: `vtk` is required for the 3D viewport. If the app fails with `ModuleNotFoundError: No module named 'vtk'`, install it with `pip install vtk` or `conda install -c conda-forge vtk`.
+>
+> If the app fails with an ImportError such as `DLL load failed while importing vtkWebCore`, this may be caused by Windows Defender, AppLocker, or another application control policy blocking VTK DLLs. In that case, unblock VTK in your security policy or run the app from an environment where those policies do not block DLL loading.
+
 ### Windows setup
 On Windows, use the provided batch files `setup_env.bat` and `run.bat`.
 

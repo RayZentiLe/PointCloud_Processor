@@ -597,6 +597,9 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             QMessageBox.warning(self, "Busy", "A task is already running.")
             return
+
+        if hasattr(self, "cross_section_dock") and self.cross_section_dock is not None:
+            self.cross_section_dock.setVisible(False)
         
         self.pbar.setVisible(True)
         self.pbar.setValue(0)
@@ -707,6 +710,25 @@ class MainWindow(QMainWindow):
         if self._loading_dialog:
             self._loading_dialog.close()
             self._loading_dialog = None
+
+    def closeEvent(self, event):
+        try:
+            if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
+                shutdown_preview = getattr(self.cross_section_panel, "shutdown_vtk", None)
+                if callable(shutdown_preview):
+                    shutdown_preview()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "viewport") and self.viewport is not None:
+                shutdown_viewport = getattr(self.viewport, "shutdown_vtk", None)
+                if callable(shutdown_viewport):
+                    shutdown_viewport()
+        except Exception:
+            pass
+
+        super().closeEvent(event)
 
     # ── Panel visibility handlers ────────────────────────────────
 

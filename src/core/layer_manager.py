@@ -11,7 +11,8 @@ class LayerManager(QObject):
     visibility_changed = Signal(str)
     mask_added = Signal(str, str)       # layer_id, mask_group_id
     mask_removed = Signal(str, str)     # layer_id, mask_group_id
-    selection_changed = Signal()
+
+    selection_changed = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -211,13 +212,21 @@ class LayerManager(QObject):
 
     # ── selection ────────────────────────────────────────────────
 
+
     def set_selection(self, layer_id, sublayer_name=None):
-        changed = (self._selected_layer_id != layer_id or
-                   self._selected_sublayer_name != sublayer_name)
+        changed = (
+            self._selected_layer_id != layer_id or
+            self._selected_sublayer_name != sublayer_name
+        )
+
         self._selected_layer_id = layer_id
         self._selected_sublayer_name = sublayer_name
+
         if changed:
-            self.selection_changed.emit()
+            layer = self.get_layer(layer_id)
+            self.selection_changed.emit(layer)
+
+
 
     # ── static helpers ───────────────────────────────────────────
 

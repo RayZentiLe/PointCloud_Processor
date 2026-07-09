@@ -4,15 +4,162 @@ import vtk
 from vtk.util.numpy_support import numpy_to_vtk, numpy_to_vtkIdTypeArray
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PySide6.QtCore import Qt, QEvent, QPoint, Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QColorDialog, QMenu
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QColorDialog, QMenu, QPushButton, QHBoxLayout
 from PySide6.QtGui import QColor
 from tools.gradient_colors import compute_gradient_colors
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
 
 
+class ZPlanePanStyle(vtk.vtkInteractorStyleTrackballCamera):
+    """Camera style that keeps the main viewport locked to a top-down Z view."""
+
+    def __init__(self, viewport):
+        super().__init__()
+        self._viewport = viewport
+
+    def OnLeftButtonDown(self):
+        if getattr(self._viewport, "_fixed_z_plane_view", True):
+            self.StartPan()
+        else:
+            super().OnLeftButtonDown()
+
+    def OnLeftButtonUp(self):
+        if getattr(self._viewport, "_fixed_z_plane_view", True):
+            self.EndPan()
+        else:
+            super().OnLeftButtonUp()
+
+    def OnMiddleButtonDown(self):
+        self.StartPan()
+
+    def OnMiddleButtonUp(self):
+        self.EndPan()
+
+    def OnRightButtonDown(self):
+        self.StartDolly()
+
+    def OnRightButtonUp(self):
+        self.EndDolly()
+
+    def OnMouseWheelForward(self):
+        self.StartDolly()
+        self.Dolly()
+        self.EndDolly()
+        self._viewport._enforce_z_plane_camera()
+
+    def OnMouseWheelBackward(self):
+        self.StartDolly()
+        self.Dolly()
+        self.EndDolly()
+        self._viewport._enforce_z_plane_camera()
+
+    def Rotate(self):
+        if getattr(self._viewport, "_fixed_z_plane_view", True):
+            self._viewport._enforce_z_plane_camera()
+            return
+        super().Rotate()
+
+    def Spin(self):
+        if getattr(self._viewport, "_fixed_z_plane_view", True):
+            self._viewport._enforce_z_plane_camera()
+            return
+        super().Spin()
+
+    def OnMouseMove(self):
+        if not getattr(self._viewport, "_fixed_z_plane_view", True):
+            super().OnMouseMove()
+            return
+        state = self.GetState()
+        if state == vtk.VTKIS_PAN:
+            self.Pan()
+            self._viewport._enforce_z_plane_camera()
+            self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+            return
+        if state == vtk.VTKIS_DOLLY:
+            self.Dolly()
+            self._viewport._enforce_z_plane_camera()
+            self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+            return
+        self._viewport._enforce_z_plane_camera()
+        super().OnMouseMove()
+
+
+class OrbitViewStyle(vtk.vtkInteractorStyleTrackballCamera):
+    """Free orbit camera style with left-drag rotate, middle-drag pan, right-drag zoom."""
+
+    def __init__(self, viewport):
+        super().__init__()
+        self._viewport = viewport
+
+    def OnLeftButtonDown(self):
+        self.FindPokedRenderer(
+            self.GetInteractor().GetEventPosition()[0],
+            self.GetInteractor().GetEventPosition()[1],
+        )
+        self.GrabFocus(self.EventCallbackCommand)
+        self.StartRotate()
+
+    def OnLeftButtonUp(self):
+        self.ReleaseFocus()
+        self.EndRotate()
+
+    def OnMiddleButtonDown(self):
+        self.FindPokedRenderer(
+            self.GetInteractor().GetEventPosition()[0],
+            self.GetInteractor().GetEventPosition()[1],
+        )
+        self.GrabFocus(self.EventCallbackCommand)
+        self.StartPan()
+
+    def OnMiddleButtonUp(self):
+        self.ReleaseFocus()
+        self.EndPan()
+
+    def OnRightButtonDown(self):
+        self.FindPokedRenderer(
+            self.GetInteractor().GetEventPosition()[0],
+            self.GetInteractor().GetEventPosition()[1],
+        )
+        self.GrabFocus(self.EventCallbackCommand)
+        self.StartDolly()
+
+    def OnRightButtonUp(self):
+        self.ReleaseFocus()
+        self.EndDolly()
+
+    def OnMouseWheelForward(self):
+        self.StartDolly()
+        self.Dolly()
+        self.EndDolly()
+        self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+
+    def OnMouseWheelBackward(self):
+        self.StartDolly()
+        self.Dolly()
+        self.EndDolly()
+        self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+
+    def OnMouseMove(self):
+        state = self.GetState()
+        if state == vtk.VTKIS_ROTATE:
+            self.Rotate()
+            self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+            return
+        if state == vtk.VTKIS_PAN:
+            self.Pan()
+            self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+            return
+        if state == vtk.VTKIS_DOLLY:
+            self.Dolly()
+            self.InvokeEvent(vtk.vtkCommand.InteractionEvent, None)
+            return
+        super().OnMouseMove()
+
+
 class Viewport(QWidget):
     cross_section_point_selected = Signal(object)
+    cross_section_mode_changed = Signal(str)
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
@@ -21,6 +168,8 @@ class Viewport(QWidget):
         self._bg_color = (255.0, 255.0, 255.0)  # Default to white background
         self._right_press_pos = None
         self._picker = vtk.vtkPointPicker()
+        self._picker.SetTolerance(0.01)
+        self._world_picker = vtk.vtkWorldPointPicker()
         self._cross_section_active = False
         self._cross_section_layer_id: str | None = None
         self._cross_section_points: list[np.ndarray] = []
@@ -28,17 +177,33 @@ class Viewport(QWidget):
         self._cross_section_direction_xy: np.ndarray | None = None
         self._cross_section_pick_mode = "direction"
         self._cross_section_line_actor = None
+        self._cross_section_preview_line_actor = None
         self._cross_section_confirmed_line_actor = None  # Green line when confirmed
-        self._cross_section_polyline_actor = None  # Polyline connecting all confirmed points
+        self._cross_section_polyline_actor = None  # Vertical cross-section plane actor
         self._cross_section_point_actors: list[vtk.vtkActor] = []
         self._cross_section_ref_actor = None
         self._cross_section_reference_projection_actor = None
         self._cross_section_reference_line_actor = None
         self._cross_section_thickness = 1.0
+        self._cross_section_plane_offset = 0.0
         self._cross_section_direction_confirmed = False  # Track confirmation state
+        self._cross_section_pick_session_active = False
+        self._cross_section_preview_point: np.ndarray | None = None
+        self._cross_section_hover_actor = None
+        self._cross_section_hover_point: np.ndarray | None = None
+        self._cross_section_hover_label_actor = None
+        self._cross_section_selected_label_actors: list[vtk.vtkActor2D] = []
+        self._fixed_z_plane_view = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        top_bar = QHBoxLayout()
+        top_bar.addStretch()
+        self._view_mode_button = QPushButton("Fixed Z Plane View", self)
+        self._view_mode_button.clicked.connect(self._toggle_view_mode)
+        top_bar.addWidget(self._view_mode_button)
+        layout.addLayout(top_bar)
 
         self.vtk_widget = QVTKRenderWindowInteractor(self)
         layout.addWidget(self.vtk_widget)
@@ -48,9 +213,15 @@ class Viewport(QWidget):
         self.renderer.GradientBackgroundOff()
         self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
 
+        camera = self.renderer.GetActiveCamera()
+        if camera is not None:
+            camera.SetParallelProjection(True)
+
         interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
-        style = vtk.vtkInteractorStyleTrackballCamera()
+        style = ZPlanePanStyle(self)
         interactor.SetInteractorStyle(style)
+        self._z_plane_style = style
+        self._free_view_style = OrbitViewStyle(self)
 
         # orientation axes
         axes = vtk.vtkAxesActor()
@@ -79,16 +250,54 @@ class Viewport(QWidget):
 
         interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
         interactor.AddObserver("LeftButtonPressEvent", self._on_left_button_press)
+        interactor.AddObserver("MouseMoveEvent", self._on_mouse_move)
+        self._vtk_closed = False
+
+    def shutdown_vtk(self):
+        if self._vtk_closed:
+            return
+        self._vtk_closed = True
+        try:
+            self._remove_cross_section_actors()
+        except Exception:
+            pass
+        try:
+            for layer_id in list(self._actors.keys()):
+                self._clear_actors(layer_id)
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_orient") and self._orient is not None:
+                self._orient.EnabledOff()
+                self._orient.SetInteractor(None)
+        except Exception:
+            pass
+        try:
+            render_window = self.vtk_widget.GetRenderWindow()
+            if render_window is not None:
+                interactor = render_window.GetInteractor()
+                if interactor is not None:
+                    interactor.SetInteractorStyle(None)
+                    interactor.RemoveAllObservers()
+                render_window.Finalize()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        self.shutdown_vtk()
+        super().closeEvent(event)
 
 
     def _on_left_button_press(self, obj, event):
+        if not self._fixed_z_plane_view or not self._cross_section_active:
+            return
         x, y = obj.GetEventPosition()
-
-        print("Mouse click at:", x, y)  # debug
-
         self._handle_cross_section_pick(x, y)
 
-        obj.OnLeftButtonDown()
+    def _on_mouse_move(self, obj, event):
+        x, y = obj.GetEventPosition()
+        self._update_global_hover(x, y)
+        self._update_cross_section_mouse_preview(x, y)
 
     # ── event filter (right-click → background color picker) ─────
 
@@ -96,11 +305,18 @@ class Viewport(QWidget):
         if obj is self.vtk_widget:
             etype = event.type()
             if etype == QEvent.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.LeftButton and self._cross_section_active:
+                if (
+                    event.button() == Qt.MouseButton.LeftButton
+                    and self._cross_section_active
+                    and self._fixed_z_plane_view
+                ):
                     pos = event.position().toPoint()
                     self._handle_cross_section_pick(pos.x(), pos.y())
                     return True
                 if event.button() == Qt.MouseButton.RightButton:
+                    if self._cross_section_pick_session_active:
+                        self.end_cross_section_pick_session()
+                        return True
                     self._right_press_pos = event.position().toPoint()
             elif etype == QEvent.Type.MouseButtonRelease:
                 if event.button() == Qt.MouseButton.RightButton:
@@ -133,7 +349,7 @@ class Viewport(QWidget):
 
     def enable_cross_section_mode(self, layer):
         if self._cross_section_active and self._cross_section_layer_id == layer.id:
-            self._cross_section_pick_mode = "direction"
+            self._set_cross_section_pick_mode("direction")
             self._render()
             return
 
@@ -142,8 +358,12 @@ class Viewport(QWidget):
         self._cross_section_points.clear()
         self._cross_section_reference = None
         self._cross_section_direction_xy = None
-        self._cross_section_pick_mode = "direction"
+        self._cross_section_preview_point = None
+        self._cross_section_plane_offset = 0.0
+        self._clear_cross_section_hover_actor()
+        self._set_cross_section_pick_mode("direction")
         self._cross_section_direction_confirmed = False
+        self._cross_section_pick_session_active = False
         self._remove_cross_section_actors()
         self._render()
 
@@ -153,18 +373,43 @@ class Viewport(QWidget):
         self._cross_section_points.clear()
         self._cross_section_reference = None
         self._cross_section_direction_xy = None
-        self._cross_section_pick_mode = "direction"
+        self._cross_section_preview_point = None
+        self._cross_section_plane_offset = 0.0
+        self._clear_cross_section_hover_actor()
+        self._set_cross_section_pick_mode("direction")
         self._cross_section_direction_confirmed = False
+        self._cross_section_pick_session_active = False
         self._remove_cross_section_actors()
         self._render()
 
     def set_cross_section_pick_mode(self, mode):
         if mode in ("direction", "reference", "none"):
-            self._cross_section_pick_mode = mode
+            self._set_cross_section_pick_mode(mode)
             self._render()
+
+    def begin_cross_section_pick_session(self, mode="direction", clear_existing=False):
+        if mode not in ("direction", "reference"):
+            return
+        if clear_existing and mode == "direction":
+            self.clear_cross_section_direction_points()
+            self._cross_section_direction_confirmed = False
+        self._cross_section_pick_session_active = True
+        self._set_cross_section_pick_mode(mode)
+        self._render()
+
+    def end_cross_section_pick_session(self):
+        if not self._cross_section_pick_session_active:
+            return
+        self._cross_section_pick_session_active = False
+        self._set_cross_section_pick_mode("none")
+        self._render()
 
     def set_cross_section_thickness(self, value):
         self._cross_section_thickness = float(value)
+
+    def set_cross_section_plane_offset(self, value):
+        self._cross_section_plane_offset = float(value)
+        self._update_cross_section_preview()
 
     def set_cross_section_direction_confirmed(self, confirmed):
         """Set whether the direction points are confirmed (locked)."""
@@ -175,6 +420,9 @@ class Viewport(QWidget):
     def clear_cross_section_direction_points(self):
         self._cross_section_points.clear()
         self._cross_section_direction_xy = None
+        self._cross_section_direction_confirmed = False
+        self._cross_section_preview_point = None
+        self._clear_cross_section_hover_actor()
         self._remove_cross_section_actors(point_actors=True, line_actor=True)
         self._render()
 
@@ -199,30 +447,49 @@ class Viewport(QWidget):
             "reference_point": self._cross_section_reference,
             "direction_xy": self._cross_section_direction_xy,
             "thickness": self._cross_section_thickness,
+            "plane_offset": self._cross_section_plane_offset,
             "mode": self._cross_section_pick_mode,
+            "pick_session_active": self._cross_section_pick_session_active,
         }
+
+    def _set_cross_section_pick_mode(self, mode):
+        if self._cross_section_pick_mode == mode:
+            return
+        self._cross_section_pick_mode = mode
+        self.cross_section_mode_changed.emit(mode)
 
     def _handle_cross_section_pick(self, x, y):
         if not self._cross_section_active:
             return
-        if self._picker.Pick(x, self.vtk_widget.height() - y, 0, self.renderer) == 0:
-            return
-        point = np.asarray(self._picker.GetPickPosition(), dtype=np.float64)
-        point_id = self._picker.GetPointId()
-        if point_id < 0:
+        point = self._cross_section_hover_point
+        if point is None:
+            point = self._pick_cross_section_point(x, y)
+        if point is None:
             return
 
         if self._cross_section_pick_mode == "direction":
-            # Don't allow picking more direction points if already confirmed
-            if self._cross_section_direction_confirmed:
+            if not self._cross_section_pick_session_active:
                 return
+            if len(self._cross_section_points) >= 2:
+                self.clear_cross_section_direction_points()
+            layer = self.layer_manager.get_layer(self._cross_section_layer_id)
+            if layer is None or len(layer.points) == 0:
+                marker_z = float(point[2])
+            else:
+                marker_z = float(np.max(layer.points[:, 2]))
+            marker_point = np.array([point[0], point[1], marker_z], dtype=np.float64)
             self._cross_section_points.append(point)
-            # Bigger cyan spheres for selected points
-            actor = self._make_sphere_actor(point, radius=0.03, color=(0.0, 1.0, 1.0))
+            actor = self._make_sphere_actor(marker_point, radius=0.06, color=(1.0, 0.0, 0.0))
             self._cross_section_point_actors.append(actor)
             self.renderer.AddActor(actor)
+            label_actor = self._make_screen_label_actor(marker_point, (1.0, 0.0, 0.0))
+            self._cross_section_selected_label_actors.append(label_actor)
+            self.renderer.AddActor2D(label_actor)
+            self._cross_section_direction_confirmed = len(self._cross_section_points) == 2
             self._update_cross_section_preview()
             self.cross_section_point_selected.emit({"mode": "direction", "point": point})
+            if self._cross_section_direction_confirmed:
+                self.end_cross_section_pick_session()
         elif self._cross_section_pick_mode == "reference":
             self._cross_section_reference = point
             if self._cross_section_ref_actor is not None:
@@ -234,10 +501,13 @@ class Viewport(QWidget):
             self.cross_section_point_selected.emit({"mode": "reference", "point": point})
 
     def _update_cross_section_preview(self):
-        # Remove preview line
         if self._cross_section_line_actor is not None:
             self.renderer.RemoveActor(self._cross_section_line_actor)
             self._cross_section_line_actor = None
+
+        if self._cross_section_preview_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_preview_line_actor)
+            self._cross_section_preview_line_actor = None
 
         # Remove confirmed line
         if self._cross_section_confirmed_line_actor is not None:
@@ -254,55 +524,282 @@ class Viewport(QWidget):
             self._render()
             return
 
-        points = np.asarray(self._cross_section_points, dtype=np.float64)
-        xy = points[:, :2]
-        mean_xy = xy.mean(axis=0)
-        u, s, vh = np.linalg.svd(xy - mean_xy)
-        direction_xy = vh[0]
-        if np.linalg.norm(direction_xy) == 0:
+        p0 = np.asarray(self._cross_section_points[0], dtype=np.float64)
+        p1 = np.asarray(self._cross_section_points[1], dtype=np.float64)
+        delta_xy = p1[:2] - p0[:2]
+        if np.linalg.norm(delta_xy) == 0:
             return
-        direction_xy = direction_xy / np.linalg.norm(direction_xy)
-        if direction_xy[0] < 0:
-            direction_xy = -direction_xy
+        direction_xy = delta_xy / np.linalg.norm(delta_xy)
         self._cross_section_direction_xy = direction_xy
 
         layer = self.layer_manager.get_layer(self._cross_section_layer_id)
         if layer is None or len(layer.points) == 0:
-            zmin = 0.0
-            zmax = 1.0
             span = 1.0
+            max_z = max(float(p0[2]), float(p1[2]))
         else:
-            zmin = float(np.min(layer.points[:, 2]))
-            zmax = float(np.max(layer.points[:, 2]))
-            span = float(np.linalg.norm(layer.points[:, :2].ptp(axis=0)))
+            span = float(np.linalg.norm(np.ptp(layer.points[:, :2], axis=0)))
+            max_z = float(np.max(layer.points[:, 2]))
         span = max(span, 1.0)
-        line_length = span * 1.5
+        plane_normal_xy = np.array([-direction_xy[1], direction_xy[0]], dtype=np.float64)
+        plane_normal_xy = plane_normal_xy / np.linalg.norm(plane_normal_xy)
 
-        z0 = float(np.mean(points[:, 2])) if self._cross_section_reference is None else float(self._cross_section_reference[2])
-        start = np.array([mean_xy[0] - direction_xy[0] * line_length,
-                          mean_xy[1] - direction_xy[1] * line_length,
-                          zmin])
-        end = np.array([mean_xy[0] + direction_xy[0] * line_length,
-                        mean_xy[1] + direction_xy[1] * line_length,
-                        zmax])
+        start = np.array([p0[0], p0[1], max_z], dtype=np.float64)
+        end = np.array([p1[0], p1[1], max_z], dtype=np.float64)
 
-        # Show the normal direction line from the fit
-        if self._cross_section_direction_confirmed:
-            self._cross_section_line_actor = self._make_line_actor(
-                start, end, color=(0.0, 1.0, 0.0), width=6)
-            self.renderer.AddActor(self._cross_section_line_actor)
-            # Also optionally draw the selected points polyline for context
-            self._cross_section_polyline_actor = self._make_polyline_actor(
-                points, color=(0.0, 0.7, 0.7), width=2)
-            if self._cross_section_polyline_actor is not None:
-                self.renderer.AddActor(self._cross_section_polyline_actor)
+        self._cross_section_line_actor = self._make_line_actor(
+            start,
+            end,
+            color=(1.0, 1.0, 0.0),
+            width=4,
+        )
+        self.renderer.AddActor(self._cross_section_line_actor)
+
+        plane_half_length = span * 1.5
+        plane_center_xy = p0[:2] + direction_xy * self._cross_section_plane_offset
+        if layer is None or len(layer.points) == 0:
+            min_z = float(min(p0[2], p1[2]))
+            max_z = float(max(p0[2], p1[2]))
         else:
-            # Show yellow preview line through all points
-            self._cross_section_line_actor = self._make_line_actor(start, end, color=(1.0, 1.0, 0.0), width=4)
-            self.renderer.AddActor(self._cross_section_line_actor)
+            min_z = float(np.min(layer.points[:, 2]))
+            max_z = float(np.max(layer.points[:, 2]))
+        if abs(max_z - min_z) < 1e-6:
+            max_z = min_z + max(span * 0.25, 1.0)
+
+        plane_bottom_start = np.array([
+            plane_center_xy[0] - plane_normal_xy[0] * plane_half_length,
+            plane_center_xy[1] - plane_normal_xy[1] * plane_half_length,
+            min_z,
+        ], dtype=np.float64)
+        plane_bottom_end = np.array([
+            plane_center_xy[0] + plane_normal_xy[0] * plane_half_length,
+            plane_center_xy[1] + plane_normal_xy[1] * plane_half_length,
+            min_z,
+        ], dtype=np.float64)
+        plane_top_start = np.array([
+            plane_bottom_start[0],
+            plane_bottom_start[1],
+            max_z,
+        ], dtype=np.float64)
+        plane_top_end = np.array([
+            plane_bottom_end[0],
+            plane_bottom_end[1],
+            max_z,
+        ], dtype=np.float64)
+
+        self._cross_section_polyline_actor = self._make_plane_actor(
+            plane_bottom_start,
+            plane_bottom_end,
+            plane_top_end,
+            plane_top_start,
+            color=(0.0, 0.7, 0.7),
+            opacity=0.5,
+        )
+        self.renderer.AddActor(self._cross_section_polyline_actor)
+
+        self._cross_section_confirmed_line_actor = self._make_line_actor(
+            np.array([
+                plane_bottom_start[0],
+                plane_bottom_start[1],
+                max_z,
+            ], dtype=np.float64),
+            np.array([
+                plane_bottom_end[0],
+                plane_bottom_end[1],
+                max_z,
+            ], dtype=np.float64),
+            color=(0.0, 0.7, 0.7),
+            width=2,
+        )
+        self.renderer.AddActor(self._cross_section_confirmed_line_actor)
 
         self._update_cross_section_reference_markers()
         self._render()
+
+    def _update_cross_section_mouse_preview(self, x, y):
+        if self._cross_section_pick_mode != "direction":
+            return
+        if not self._cross_section_pick_session_active:
+            return
+        if len(self._cross_section_points) == 0:
+            point = self._pick_cross_section_point(x, y)
+            self._cross_section_preview_point = point
+            self._update_cross_section_hover(point)
+            return
+        if len(self._cross_section_points) != 1:
+            self._cross_section_preview_point = None
+            if self._cross_section_preview_line_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_line_actor)
+                self._cross_section_preview_line_actor = None
+                self._render()
+            return
+        point = self._pick_cross_section_point(x, y)
+        if point is None:
+            self._update_cross_section_hover(None)
+            return
+        self._cross_section_preview_point = point
+        self._update_cross_section_hover(point)
+
+        if self._cross_section_preview_line_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_preview_line_actor)
+            self._cross_section_preview_line_actor = None
+
+        layer = self.layer_manager.get_layer(self._cross_section_layer_id)
+        if layer is None or len(layer.points) == 0:
+            preview_z = max(float(self._cross_section_points[0][2]), float(point[2]))
+        else:
+            preview_z = float(np.max(layer.points[:, 2]))
+
+        preview_start = np.array([
+            self._cross_section_points[0][0],
+            self._cross_section_points[0][1],
+            preview_z,
+        ], dtype=np.float64)
+        preview_end = np.array([
+            point[0],
+            point[1],
+            preview_z,
+        ], dtype=np.float64)
+
+        self._cross_section_preview_line_actor = self._make_line_actor(
+            preview_start,
+            preview_end,
+            color=(1.0, 1.0, 0.0),
+            width=3,
+        )
+        self.renderer.AddActor(self._cross_section_preview_line_actor)
+        self._render()
+
+    def _update_cross_section_hover(self, point):
+        if point is None:
+            if self._clear_cross_section_hover_actor():
+                self._render()
+            return
+
+        point = np.asarray(point, dtype=np.float64)
+        if (
+            self._cross_section_hover_point is not None and
+            np.allclose(self._cross_section_hover_point, point)
+        ):
+            return
+
+        self._clear_cross_section_hover_actor()
+        self._cross_section_hover_actor = self._make_sphere_actor(
+            point,
+            radius=0.1,
+            color=(1.0, 0.5, 0.0),
+        )
+        self._cross_section_hover_point = point
+        self.renderer.AddActor(self._cross_section_hover_actor)
+        self._update_hover_label(point)
+
+    def _update_global_hover(self, x, y):
+        point = self._pick_any_visible_point(x, y)
+        if point is None:
+            self._clear_cross_section_hover_actor()
+            return
+        self._update_cross_section_hover(point)
+
+    def _clear_cross_section_hover_actor(self):
+        removed = False
+        if self._cross_section_hover_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_hover_actor)
+            self._cross_section_hover_actor = None
+            removed = True
+        if self._cross_section_hover_label_actor is not None:
+            self.renderer.RemoveActor2D(self._cross_section_hover_label_actor)
+            self._cross_section_hover_label_actor = None
+            removed = True
+        self._cross_section_hover_point = None
+        return removed
+
+    def _update_hover_label(self, point):
+        if self._cross_section_hover_label_actor is not None:
+            self.renderer.RemoveActor2D(self._cross_section_hover_label_actor)
+            self._cross_section_hover_label_actor = None
+        self._cross_section_hover_label_actor = self._make_screen_label_actor(point, (1.0, 0.5, 0.0))
+        self.renderer.AddActor2D(self._cross_section_hover_label_actor)
+
+    def _make_screen_label_actor(self, point, color):
+        coord = self._world_to_display(point)
+        label = vtk.vtkTextActor()
+        label.SetInput(f"({point[0]:.3f}, {point[1]:.3f}, {point[2]:.3f})")
+        label.SetPosition(coord[0] + 10, coord[1] + 10)
+        text_prop = label.GetTextProperty()
+        text_prop.SetFontSize(14)
+        text_prop.SetColor(*color)
+        text_prop.SetBold(True)
+        text_prop.SetBackgroundColor(1.0, 1.0, 1.0)
+        text_prop.SetBackgroundOpacity(0.7)
+        return label
+
+    def _world_to_display(self, point):
+        self.renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
+        self.renderer.WorldToDisplay()
+        return self.renderer.GetDisplayPoint()
+
+    def _pick_cross_section_point(self, x, y):
+        layer = self.layer_manager.get_layer(self._cross_section_layer_id)
+        if layer is None:
+            return None
+
+        display_y = y
+
+        if self._picker.Pick(x, display_y, 0, self.renderer):
+            point = np.asarray(self._picker.GetPickPosition(), dtype=np.float64)
+            if np.all(np.isfinite(point)):
+                return point
+
+        self._world_picker.Pick(x, display_y, 0, self.renderer)
+        world_point = np.asarray(self._world_picker.GetPickPosition(), dtype=np.float64)
+        if not np.all(np.isfinite(world_point)):
+            return None
+
+        if isinstance(layer, PointCloudLayer) and len(layer.points) > 0:
+            points = layer.points
+        elif isinstance(layer, MeshLayer) and len(layer.vertices) > 0:
+            points = layer.vertices
+        else:
+            return world_point
+
+        deltas = points[:, :2] - world_point[:2]
+        nearest_index = int(np.argmin(np.einsum("ij,ij->i", deltas, deltas)))
+        snapped_point = np.asarray(points[nearest_index], dtype=np.float64)
+        return snapped_point
+
+    def _pick_any_visible_point(self, x, y):
+        display_y = y
+
+        if self._picker.Pick(x, display_y, 0, self.renderer):
+            point = np.asarray(self._picker.GetPickPosition(), dtype=np.float64)
+            if np.all(np.isfinite(point)):
+                return point
+
+        self._world_picker.Pick(x, display_y, 0, self.renderer)
+        world_point = np.asarray(self._world_picker.GetPickPosition(), dtype=np.float64)
+        if not np.all(np.isfinite(world_point)):
+            return None
+
+        best_point = None
+        best_dist2 = None
+        for layer in self.layer_manager.get_all_layers():
+            if not getattr(layer, "visible", True):
+                continue
+            if isinstance(layer, PointCloudLayer) and len(layer.points) > 0:
+                points = layer.points
+            elif isinstance(layer, MeshLayer) and len(layer.vertices) > 0:
+                points = layer.vertices
+            else:
+                continue
+
+            deltas = points[:, :2] - world_point[:2]
+            dist2 = np.einsum("ij,ij->i", deltas, deltas)
+            nearest_index = int(np.argmin(dist2))
+            nearest_dist2 = float(dist2[nearest_index])
+            if best_dist2 is None or nearest_dist2 < best_dist2:
+                best_dist2 = nearest_dist2
+                best_point = np.asarray(points[nearest_index], dtype=np.float64)
+
+        return best_point
 
     def _update_cross_section_reference_markers(self):
         if self._cross_section_reference is None:
@@ -312,9 +809,8 @@ class Viewport(QWidget):
         if len(self._cross_section_points) < 2:
             return
 
-        # Compute closest point on the direction line (in XY) for the selected reference
-        points = np.asarray(self._cross_section_points, dtype=np.float64)
-        origin_xy = points[:, :2].mean(axis=0)
+        # Compute closest point on the cross-section plane trace (in XY) for the selected reference
+        origin_xy = np.asarray(self._cross_section_points[0][:2], dtype=np.float64)
         direction = self._cross_section_direction_xy
         ref_xy = self._cross_section_reference[:2]
         projected_xy = origin_xy + direction * np.dot(ref_xy - origin_xy, direction)
@@ -347,17 +843,24 @@ class Viewport(QWidget):
             for actor in self._cross_section_point_actors:
                 self.renderer.RemoveActor(actor)
             self._cross_section_point_actors.clear()
+            for actor in self._cross_section_selected_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._cross_section_selected_label_actors.clear()
 
         if line_actor:
             if self._cross_section_line_actor is not None:
                 self.renderer.RemoveActor(self._cross_section_line_actor)
                 self._cross_section_line_actor = None
+            if self._cross_section_preview_line_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_line_actor)
+                self._cross_section_preview_line_actor = None
             if self._cross_section_confirmed_line_actor is not None:
                 self.renderer.RemoveActor(self._cross_section_confirmed_line_actor)
                 self._cross_section_confirmed_line_actor = None
             if self._cross_section_polyline_actor is not None:
                 self.renderer.RemoveActor(self._cross_section_polyline_actor)
                 self._cross_section_polyline_actor = None
+            self._clear_cross_section_hover_actor()
 
         if ref_actor and self._cross_section_ref_actor is not None:
             self.renderer.RemoveActor(self._cross_section_ref_actor)
@@ -444,10 +947,41 @@ class Viewport(QWidget):
         actor.GetProperty().SetOpacity(0.9)
         return actor
 
+    def _make_plane_actor(self, p0, p1, p2, p3, color=(0.0, 0.7, 0.7), opacity=0.5):
+        pts = vtk.vtkPoints()
+        pts.InsertNextPoint(*p0.tolist())
+        pts.InsertNextPoint(*p1.tolist())
+        pts.InsertNextPoint(*p2.tolist())
+        pts.InsertNextPoint(*p3.tolist())
+
+        quad = vtk.vtkQuad()
+        quad.GetPointIds().SetId(0, 0)
+        quad.GetPointIds().SetId(1, 1)
+        quad.GetPointIds().SetId(2, 2)
+        quad.GetPointIds().SetId(3, 3)
+
+        cells = vtk.vtkCellArray()
+        cells.InsertNextCell(quad)
+
+        poly = vtk.vtkPolyData()
+        poly.SetPoints(pts)
+        poly.SetPolys(cells)
+
+        mapper = vtk.vtkPolyDataMapper()
+        mapper.SetInputData(poly)
+
+        actor = vtk.vtkActor()
+        actor.SetMapper(mapper)
+        actor.GetProperty().SetColor(*color)
+        actor.GetProperty().SetOpacity(opacity)
+        actor.GetProperty().SetInterpolationToFlat()
+        return actor
+
     # ── public ───────────────────────────────────────────────────
 
     def fit_all(self):
         self.renderer.ResetCamera()
+        self._enforce_z_plane_camera()
         self._render()
 
     def rebuild_all(self):
@@ -498,6 +1032,50 @@ class Viewport(QWidget):
                   file=sys.stderr)
 
     def _render(self):
+        if self._fixed_z_plane_view:
+            self._enforce_z_plane_camera()
+        self.vtk_widget.GetRenderWindow().Render()
+
+    def _enforce_z_plane_camera(self):
+        if not self._fixed_z_plane_view:
+            return
+        camera = self.renderer.GetActiveCamera()
+        if camera is None:
+            return
+
+        camera.SetParallelProjection(True)
+
+        focal = np.array(camera.GetFocalPoint(), dtype=np.float64)
+        position = np.array(camera.GetPosition(), dtype=np.float64)
+        distance = float(abs(position[2] - focal[2]))
+        if distance < 1e-6:
+            distance = float(camera.GetDistance())
+        if distance < 1e-6:
+            distance = 1.0
+
+        camera.SetPosition(focal[0], focal[1], focal[2] + distance)
+        camera.SetFocalPoint(focal[0], focal[1], focal[2])
+        camera.SetViewUp(0.0, 1.0, 0.0)
+        camera.OrthogonalizeViewUp()
+
+    def _toggle_view_mode(self):
+        self._fixed_z_plane_view = not self._fixed_z_plane_view
+        interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
+        if interactor is not None:
+            interactor.SetInteractorStyle(
+                self._z_plane_style if self._fixed_z_plane_view else self._free_view_style
+            )
+
+        camera = self.renderer.GetActiveCamera()
+        if camera is not None:
+            if self._fixed_z_plane_view:
+                camera.SetParallelProjection(True)
+                self._view_mode_button.setText("Fixed Z Plane View")
+                self._enforce_z_plane_camera()
+            else:
+                camera.SetParallelProjection(False)
+                camera.OrthogonalizeViewUp()
+                self._view_mode_button.setText("Orbit / Free Orbit View")
         self.vtk_widget.GetRenderWindow().Render()
 
     # ── colour resolution (reads vis_* attributes from layer) ────
@@ -790,4 +1368,5 @@ class Viewport(QWidget):
         camera.SetViewUp(0, 1, 0)
 
         self.renderer.ResetCamera(xmin, xmax, ymin, ymax, zmin, zmax)
+        self._enforce_z_plane_camera()
         self._render()
