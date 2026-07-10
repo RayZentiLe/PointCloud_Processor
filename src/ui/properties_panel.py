@@ -6,7 +6,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QSlider, QPushButton, QColorDialog, QGroupBox, QFormLayout,
-    QRadioButton, QButtonGroup, QDoubleSpinBox, QFrame,
+    QRadioButton, QButtonGroup, QDoubleSpinBox, QFrame, QScrollArea,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -51,6 +51,20 @@ class PropertiesPanel(QWidget):
 
     def _build_ui(self):
         root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.NoFrame)
+        root.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        root = QVBoxLayout(content)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 

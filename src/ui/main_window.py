@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog,
     QMessageBox, QProgressBar,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QDialog
 
 from core.layer_manager import LayerManager
@@ -90,6 +90,9 @@ class MainWindow(QMainWindow):
         self.properties_dock = QDockWidget("Properties", self)
         self.properties_dock.setWidget(self.props_panel)
         self.properties_dock.setMinimumWidth(260)
+        self.properties_dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+        )
         self.addDockWidget(Qt.RightDockWidgetArea, self.properties_dock)
 
         # right dock – cross section
@@ -99,8 +102,14 @@ class MainWindow(QMainWindow):
         self.cross_section_dock = QDockWidget("Cross Section", self)
         self.cross_section_dock.setWidget(self.cross_section_panel)
         self.cross_section_dock.setMinimumWidth(320)
+        self.cross_section_dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+        )
         self.addDockWidget(Qt.RightDockWidgetArea, self.cross_section_dock)
+        self.splitDockWidget(self.properties_dock, self.cross_section_dock, Qt.Vertical)
         self.cross_section_dock.setVisible(False)
+
+        QTimer.singleShot(0, self._apply_initial_dock_layout)
 
         self.toolbar = Toolbar(self.lm, self)
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
@@ -118,6 +127,14 @@ class MainWindow(QMainWindow):
         self.pbar.setMaximumWidth(300)
         self.pbar.setVisible(False)
         self.statusBar().addPermanentWidget(self.pbar)
+
+    def _apply_initial_dock_layout(self):
+        if hasattr(self, "properties_dock") and hasattr(self, "cross_section_dock"):
+            self.resizeDocks(
+                [self.properties_dock, self.cross_section_dock],
+                [380, 320],
+                Qt.Vertical,
+            )
 
     def _build_menus(self):
         fm = self.menuBar().addMenu("&File")
@@ -150,6 +167,7 @@ class MainWindow(QMainWindow):
         self.cross_section_dock.visibilityChanged.connect(self._on_cross_section_visibility_changed)
         self.log_dock.visibilityChanged.connect(self._on_log_visibility_changed)
         self.lm.selection_changed.connect(self.on_layer_selected)
+        self.lm.visibility_changed.connect(self._on_layer_visibility_changed)
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -704,6 +722,8 @@ class MainWindow(QMainWindow):
         self.toolbar.cross_section_action.blockSignals(True)
         self.toolbar.cross_section_action.setChecked(visible)
         self.toolbar.cross_section_action.blockSignals(False)
+        if visible:
+            QTimer.singleShot(0, self._apply_initial_dock_layout)
 
     def _close_loading_dialog(self):
         """Close and cleanup the loading dialog."""
@@ -759,3 +779,9 @@ class MainWindow(QMainWindow):
     def on_layer_selected(self, layer):
         print("Layer selected:", layer)  # debug
         self.cross_section_panel.set_current_layer(layer)
+
+    def _on_layer_visibility_changed(self, layer_id):
+        layer = self.lm.get_layer(layer_id)
+        current_layer = getattr(self.cross_section_panel, "_current_layer", None)
+        if layer is not None and current_layer is not None and layer.id == current_layer.id:
+            self.cross_section_panel.refresh_preview()

@@ -23,6 +23,15 @@ def main():
     app.setStyle("Fusion")
 
     window = MainWindow()
+
+    def _shutdown_main_window():
+        try:
+            if window is not None:
+                window.close()
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_shutdown_main_window)
     window.show()
 
     sys.exit(app.exec())

@@ -6,6 +6,7 @@ from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from PySide6.QtCore import Qt, QEvent, QPoint, Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QColorDialog, QMenu, QPushButton, QHBoxLayout
 from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QApplication
 from tools.gradient_colors import compute_gradient_colors
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
@@ -258,6 +259,14 @@ class Viewport(QWidget):
             return
         self._vtk_closed = True
         try:
+            self.hide()
+        except Exception:
+            pass
+        try:
+            self.setUpdatesEnabled(False)
+        except Exception:
+            pass
+        try:
             self._remove_cross_section_actors()
         except Exception:
             pass
@@ -277,15 +286,41 @@ class Viewport(QWidget):
             if render_window is not None:
                 interactor = render_window.GetInteractor()
                 if interactor is not None:
+                    try:
+                        interactor.Disable()
+                    except Exception:
+                        pass
                     interactor.SetInteractorStyle(None)
                     interactor.RemoveAllObservers()
+                try:
+                    render_window.SetOffScreenRendering(1)
+                except Exception:
+                    pass
+                try:
+                    render_window.ReleaseGraphicsResources(None)
+                except Exception:
+                    pass
                 render_window.Finalize()
+        except Exception:
+            pass
+        try:
+            self.vtk_widget.close()
         except Exception:
             pass
 
     def closeEvent(self, event):
         self.shutdown_vtk()
         super().closeEvent(event)
+
+    def hideEvent(self, event):
+        if not self._vtk_closed:
+            try:
+                render_window = self.vtk_widget.GetRenderWindow()
+                if render_window is not None:
+                    render_window.SetAbortRender(1)
+            except Exception:
+                pass
+        super().hideEvent(event)
 
 
     def _on_left_button_press(self, obj, event):
@@ -1116,6 +1151,36 @@ class Viewport(QWidget):
         if layer.colors is not None and len(layer.colors) == n:
             return layer.colors.copy().astype(np.float64)
         return np.full((n, 3), 0.6, dtype=np.float64)
+
+    def get_cross_section_preview_colors(self, layer):
+        if not isinstance(layer, PointCloudLayer):
+            return None
+        if layer.points is None or len(layer.points) == 0:
+            return np.empty((0, 3), dtype=np.float32)
+
+        colors = self._resolve_pc_colors(layer)
+        if not layer.mask_groups:
+            return colors.astype(np.float32)
+
+        visible = np.zeros(layer.point_count, dtype=bool)
+        any_mask = False
+        for mg in layer.mask_groups:
+            if mg.mask is None:
+                continue
+            any_mask = True
+            if mg.positive_visible:
+                visible |= mg.mask
+                colors = self._apply_mask_color_pc(colors, mg.mask, mg, True)
+            if mg.negative_visible:
+                neg_mask = ~mg.mask
+                visible |= neg_mask
+                colors = self._apply_mask_color_pc(colors, neg_mask, mg, False)
+
+        if any_mask:
+            colors = colors.copy()
+            colors[~visible] = 0.0
+
+        return colors.astype(np.float32)
 
     def _resolve_mesh_colors(self, layer):
         """Return (V, 3) float64 colours using vis_* attributes from properties panel."""
