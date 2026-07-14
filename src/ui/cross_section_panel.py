@@ -1080,7 +1080,7 @@ class CrossSectionPanel(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
-        outer_layout.addWidget(scroll)
+        outer_layout.addWidget(scroll, 0)
 
         content = QWidget()
         scroll.setWidget(content)
@@ -1163,12 +1163,20 @@ class CrossSectionPanel(QWidget):
         transfer_actions_row.addWidget(self._redo_transfer_btn)
         layout.addLayout(transfer_actions_row)
 
+        layout.addStretch()
+
+        preview_container = QWidget(self)
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(10, 10, 10, 10)
+        preview_layout.setSpacing(6)
+
         preview_label = QLabel("Preview")
-        layout.addWidget(preview_label)
+        preview_layout.addWidget(preview_label)
 
         self._preview_widget = CrossSectionPreviewWidget(self)
         self._preview_widget.setMinimumHeight(280)
-        layout.addWidget(self._preview_widget, 1)
+        preview_layout.addWidget(self._preview_widget, 1)
+        outer_layout.addWidget(preview_container, 1)
         self._preview_widget.selection_changed.connect(self._on_preview_selection_changed)
         self._preview_widget.set_selection_mode_enabled(True)
 
@@ -1207,8 +1215,6 @@ class CrossSectionPanel(QWidget):
         self.layer_manager.selection_changed.connect(lambda _layer: self._refresh_transfer_layer_options())
 
         self._refresh_transfer_layer_options()
-
-        layout.addStretch()
 
     def _show_vtk_error(self):
         QMessageBox.critical(self, "VTK Import Error",
