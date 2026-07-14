@@ -195,7 +195,8 @@ class Viewport(QWidget):
         self._cross_section_hover_label_actor = None
         self._cross_section_selected_label_actors: list[vtk.vtkActor2D] = []
         self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
-        self._cross_section_selection_color = np.array([1.0, 0.0, 0.6], dtype=np.float64)
+        self._cross_section_selected_point_indices_by_layer: dict[str, np.ndarray] = {}
+        self._cross_section_selection_color = np.array([1.0, 1.0, 0.0], dtype=np.float64)
         self._fixed_z_plane_view = True
 
         layout = QVBoxLayout(self)
@@ -390,6 +391,16 @@ class Viewport(QWidget):
             self._render()
             return
 
+        if self._cross_section_active and len(self._cross_section_points) >= 2 and self._cross_section_direction_xy is not None:
+            self._cross_section_active = True
+            self._cross_section_layer_id = layer.id
+            self._clear_cross_section_hover_actor()
+            self._cross_section_pick_session_active = False
+            self._set_cross_section_pick_mode("none")
+            self._update_cross_section_preview()
+            self._render()
+            return
+
         self._cross_section_active = True
         self._cross_section_layer_id = layer.id
         self._cross_section_points.clear()
@@ -417,6 +428,7 @@ class Viewport(QWidget):
         self._cross_section_direction_confirmed = False
         self._cross_section_pick_session_active = False
         self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
+        self._cross_section_selected_point_indices_by_layer = {}
         self._remove_cross_section_actors()
         self._render()
 
@@ -461,6 +473,7 @@ class Viewport(QWidget):
         self._cross_section_direction_confirmed = False
         self._cross_section_preview_point = None
         self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
+        self._cross_section_selected_point_indices_by_layer = {}
         self._clear_cross_section_hover_actor()
         self._remove_cross_section_actors(point_actors=True, line_actor=True)
         if self._cross_section_layer_id is not None:
@@ -1191,17 +1204,16 @@ class Viewport(QWidget):
     def set_cross_section_preview_selection(self, selection_uv_rect):
         layer_id = self._cross_section_layer_id
         layer = self.layer_manager.get_layer(layer_id) if layer_id is not None else None
-        if not isinstance(layer, PointCloudLayer) or layer.points is None or len(layer.points) == 0:
+        if self._cross_section_direction_xy is None or len(self._cross_section_points) < 2:
             self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
-            if layer_id is not None:
-                self._rebuild(layer_id)
-                self._render()
+            self._cross_section_selected_point_indices_by_layer = {}
+            self.rebuild_all()
             return
 
-        if not selection_uv_rect or self._cross_section_direction_xy is None or len(self._cross_section_points) < 2:
+        if not selection_uv_rect:
             self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
-            self._rebuild(layer.id)
-            self._render()
+            self._cross_section_selected_point_indices_by_layer = {}
+            self.rebuild_all()
             return
 
         left_up = selection_uv_rect["left_up"]
@@ -1218,27 +1230,39 @@ class Viewport(QWidget):
         norm = np.linalg.norm(plane_normal_xy)
         if norm == 0:
             self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
-            self._rebuild(layer.id)
-            self._render()
+            self._cross_section_selected_point_indices_by_layer = {}
+            self.rebuild_all()
             return
         plane_normal_xy = plane_normal_xy / norm
 
-        deltas_xy = layer.points[:, :2].astype(np.float64) - plane_origin[:2]
-        signed_distances = deltas_xy @ plane_normal_xy
-        thickness_mask = np.abs(signed_distances) <= float(self._cross_section_thickness)
-
         tangent_xy = np.array([-plane_normal_xy[1], plane_normal_xy[0]], dtype=np.float64)
-        along_plane = -(deltas_xy @ tangent_xy)
-        heights = layer.points[:, 2].astype(np.float64) - float(plane_origin[2])
+        selected_by_layer: dict[str, np.ndarray] = {}
+        active_selection = np.empty((0,), dtype=np.int32)
 
-        selection_mask = (
-            thickness_mask &
-            (along_plane >= u_min) & (along_plane <= u_max) &
-            (heights >= v_min) & (heights <= v_max)
-        )
-        self._cross_section_selected_point_indices = np.flatnonzero(selection_mask).astype(np.int32)
-        self._rebuild(layer.id)
-        self._render()
+        for candidate_layer in self.layer_manager.point_clouds.values():
+            if candidate_layer.points is None or len(candidate_layer.points) == 0:
+                continue
+
+            deltas_xy = candidate_layer.points[:, :2].astype(np.float64) - plane_origin[:2]
+            signed_distances = deltas_xy @ plane_normal_xy
+            thickness_mask = np.abs(signed_distances) <= float(self._cross_section_thickness)
+            along_plane = -(deltas_xy @ tangent_xy)
+            heights = candidate_layer.points[:, 2].astype(np.float64) - float(plane_origin[2])
+
+            selection_mask = (
+                thickness_mask &
+                (along_plane >= u_min) & (along_plane <= u_max) &
+                (heights >= v_min) & (heights <= v_max)
+            )
+            indices = np.flatnonzero(selection_mask).astype(np.int32)
+            if len(indices) > 0:
+                selected_by_layer[candidate_layer.id] = indices
+            if layer_id is not None and candidate_layer.id == layer_id:
+                active_selection = indices
+
+        self._cross_section_selected_point_indices_by_layer = selected_by_layer
+        self._cross_section_selected_point_indices = active_selection
+        self.rebuild_all()
 
     def _resolve_mesh_colors(self, layer):
         """Return (V, 3) float64 colours using vis_* attributes from properties panel."""
@@ -1287,9 +1311,10 @@ class Viewport(QWidget):
         ps = getattr(layer, "vis_point_size", 2)
 
         if not layer.mask_groups:
-            if layer.id == self._cross_section_layer_id and len(self._cross_section_selected_point_indices) > 0:
-                valid_indices = self._cross_section_selected_point_indices[
-                    (self._cross_section_selected_point_indices >= 0) & (self._cross_section_selected_point_indices < n)
+            selected_indices = self._cross_section_selected_point_indices_by_layer.get(layer.id, np.empty((0,), dtype=np.int32))
+            if len(selected_indices) > 0:
+                valid_indices = selected_indices[
+                    (selected_indices >= 0) & (selected_indices < n)
                 ]
                 if len(valid_indices) > 0:
                     colors = colors.copy()
@@ -1317,9 +1342,10 @@ class Viewport(QWidget):
         if not np.any(visible):
             return []
 
-        if layer.id == self._cross_section_layer_id and len(self._cross_section_selected_point_indices) > 0:
-            valid_indices = self._cross_section_selected_point_indices[
-                (self._cross_section_selected_point_indices >= 0) & (self._cross_section_selected_point_indices < n)
+        selected_indices = self._cross_section_selected_point_indices_by_layer.get(layer.id, np.empty((0,), dtype=np.int32))
+        if len(selected_indices) > 0:
+            valid_indices = selected_indices[
+                (selected_indices >= 0) & (selected_indices < n)
             ]
             if len(valid_indices) > 0:
                 colors = colors.copy()

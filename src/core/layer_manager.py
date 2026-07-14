@@ -199,6 +199,54 @@ class LayerManager(QObject):
         layer.modified = True
         self.mask_added.emit(layer_id, mask_group.id)
 
+    def transfer_points_between_sublayers(self, layer_id, from_sublayer_name, to_sublayer_name, indices):
+        layer = self.get_layer(layer_id)
+        if not isinstance(layer, PointCloudLayer):
+            return False, "Point cloud layer not found"
+        if indices is None:
+            return False, "No indices provided"
+
+        point_indices = np.asarray(indices, dtype=np.int64).ravel()
+        if point_indices.size == 0:
+            return True, ""
+
+        valid_mask = (point_indices >= 0) & (point_indices < layer.point_count)
+        point_indices = np.unique(point_indices[valid_mask])
+        if point_indices.size == 0:
+            return True, ""
+
+        from_info = self.get_sublayer_mask_group_info(layer, from_sublayer_name)
+        to_info = self.get_sublayer_mask_group_info(layer, to_sublayer_name)
+        from_mg, from_is_positive = from_info
+        to_mg, to_is_positive = to_info
+
+        if from_mg is None:
+            return False, f"Source sublayer '{from_sublayer_name}' not found"
+        if to_mg is None:
+            return False, f"Target sublayer '{to_sublayer_name}' not found"
+        if from_mg is to_mg and from_is_positive == to_is_positive:
+            return False, "Source and target sublayers must be different"
+
+        from_membership = from_mg.mask if from_is_positive else ~from_mg.mask
+        movable_indices = point_indices[from_membership[point_indices]]
+        if movable_indices.size == 0:
+            return True, ""
+
+        if from_is_positive:
+            from_mg.mask[movable_indices] = False
+        else:
+            from_mg.mask[movable_indices] = True
+
+        if to_is_positive:
+            to_mg.mask[movable_indices] = True
+        else:
+            to_mg.mask[movable_indices] = False
+
+        layer.modified = True
+        self.layer_modified.emit(layer_id)
+        self.visibility_changed.emit(layer_id)
+        return True, ""
+
     def remove_mask_group(self, layer_id, mask_group_id):
         layer = self.get_layer(layer_id)
         if layer is None:

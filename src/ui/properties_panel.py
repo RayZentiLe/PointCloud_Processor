@@ -165,14 +165,14 @@ class PropertiesPanel(QWidget):
         mm.setContentsMargins(0, 0, 0, 0)
         self.sp_min = QDoubleSpinBox()
         self.sp_min.setRange(-1e7, 1e7)
-        self.sp_min.setDecimals(4)
+        self.sp_min.setDecimals(2)
         self.sp_min.setSingleStep(0.1)
         self.sp_min.setEnabled(False)
         mm.addRow("Min:", self.sp_min)
 
         self.sp_max = QDoubleSpinBox()
         self.sp_max.setRange(-1e7, 1e7)
-        self.sp_max.setDecimals(4)
+        self.sp_max.setDecimals(2)
         self.sp_max.setSingleStep(0.1)
         self.sp_max.setEnabled(False)
         mm.addRow("Max:", self.sp_max)
@@ -228,8 +228,8 @@ class PropertiesPanel(QWidget):
         self.btn_color.clicked.connect(self._on_pick_color)
         self.cmb_dir.currentIndexChanged.connect(self._on_grad_param)
         self.bg_mode.buttonClicked.connect(self._on_mode)
-        self.sp_min.valueChanged.connect(self._on_grad_param)
-        self.sp_max.valueChanged.connect(self._on_grad_param)
+        self.sp_min.editingFinished.connect(self._on_grad_spin_finished)
+        self.sp_max.editingFinished.connect(self._on_grad_spin_finished)
         
         # Mask color controls
         self.cmb_mask_scheme.currentIndexChanged.connect(self._on_mask_scheme)
@@ -503,6 +503,13 @@ class PropertiesPanel(QWidget):
             layer.vis_gradient_max = self.sp_max.value()
 
         self._notify()
+
+    def _on_grad_spin_finished(self):
+        if self._building:
+            return
+        if not self.rb_manual.isChecked():
+            return
+        self._on_grad_param()
 
     def _on_mask_scheme(self, _idx):
         """Handle mask color mode change."""

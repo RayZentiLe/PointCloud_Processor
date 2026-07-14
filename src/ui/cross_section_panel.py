@@ -2,7 +2,7 @@ import numpy as np
 import importlib
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox,
-    QHBoxLayout, QDoubleSpinBox
+    QHBoxLayout, QDoubleSpinBox, QComboBox, QScrollArea, QFrame
 )
 from PySide6.QtCore import Signal, Qt, QEvent, QRect
 from PySide6.QtGui import QShortcut, QKeySequence, QPainter, QColor, QPen
@@ -37,6 +37,8 @@ if VTK_AVAILABLE:
                 return
             if not self._preview_widget._selection_mode_enabled:
                 return
+            if not self._preview_widget._selection_drag_active:
+                return
 
             rect = self._preview_widget._selection_rect()
             if rect.isNull():
@@ -45,7 +47,7 @@ if VTK_AVAILABLE:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setPen(QPen(QColor(255, 255, 255), 3, Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
+            painter.setBrush(QColor(255, 255, 255, 35))
             painter.drawRect(rect)
             painter.end()
 
@@ -267,6 +269,7 @@ if VTK_AVAILABLE:
             self._selection_start = None
             self._selection_end = None
             self._selected_preview_indices = np.empty((0,), dtype=np.int32)
+            self._drag_preview_indices = np.empty((0,), dtype=np.int32)
             self._highlight_color = np.array([1.0, 0.0, 0.6], dtype=np.float32)
             self._preview_points_cache = np.empty((0, 3), dtype=np.float32)
             self._preview_colors_cache = None
@@ -274,6 +277,7 @@ if VTK_AVAILABLE:
             self._edge_axes_actor = None
             self._edge_axes_label_actors = []
             self._selection_uv_rect = None
+            self._drag_rectangle_actor = None
             self._selection_corner_label_actors = []
             self._selection_rectangle_actor = None
             self._selection_overlay = None
@@ -285,8 +289,8 @@ if VTK_AVAILABLE:
             layout.addWidget(self.vtk_widget)
             self.vtk_widget.setMouseTracking(True)
             self.vtk_widget.installEventFilter(self)
-            self._selection_overlay = SelectionOverlay(self, self)
-            self._selection_overlay.setGeometry(self.vtk_widget.geometry())
+            self._selection_overlay = SelectionOverlay(self, self.vtk_widget)
+            self._selection_overlay.setGeometry(self.vtk_widget.rect())
             self._selection_overlay.raise_()
             self._selection_overlay.show()
 
@@ -372,14 +376,15 @@ if VTK_AVAILABLE:
                     pass
             super().hideEvent(event)
 
-        def set_preview_data(self, layer_points, layer_colors, plane_origin, plane_normal_xy, thickness):
+        def set_preview_data(self, layer_points, layer_colors, plane_origin, plane_normal_xy, thickness, preserve_selection=False, preserve_camera=False):
             self._layer_points = np.asarray(layer_points, dtype=np.float32)
             self._layer_colors = None if layer_colors is None else np.asarray(layer_colors, dtype=np.float32)
             self._plane_origin = np.asarray(plane_origin, dtype=np.float32)
             self._plane_normal_xy = np.asarray(plane_normal_xy, dtype=np.float32)
             self._thickness = float(thickness)
-            self.clear_selection()
-            self._rebuild_scene()
+            if not preserve_selection:
+                self.clear_selection()
+            self._rebuild_scene(preserve_camera=preserve_camera)
 
         def set_selection_mode_enabled(self, enabled):
             enabled = bool(enabled)
@@ -394,7 +399,9 @@ if VTK_AVAILABLE:
             self._selection_start = None
             self._selection_end = None
             self._selected_preview_indices = np.empty((0,), dtype=np.int32)
+            self._drag_preview_indices = np.empty((0,), dtype=np.int32)
             self._selection_uv_rect = None
+            self._clear_drag_rectangle_actor()
             self._clear_selection_corner_labels()
             self.selection_changed.emit(None)
             self.vtk_widget.update()
@@ -410,9 +417,11 @@ if VTK_AVAILABLE:
             if interactor is None:
                 return False
             x, y = interactor.GetEventPosition()
+            qt_x, qt_y = self._display_to_qt_coords(x, y)
             self._selection_drag_active = True
-            self._selection_start = (int(x), int(y))
-            self._selection_end = (int(x), int(y))
+            self._selection_start = (qt_x, qt_y)
+            self._selection_end = (qt_x, qt_y)
+            self._update_drag_rectangle_actor()
             self.vtk_widget.update()
             if self._selection_overlay is not None:
                 self._selection_overlay.update()
@@ -425,7 +434,9 @@ if VTK_AVAILABLE:
             if interactor is None:
                 return False
             x, y = interactor.GetEventPosition()
-            self._selection_end = (int(x), int(y))
+            qt_x, qt_y = self._display_to_qt_coords(x, y)
+            self._selection_end = (qt_x, qt_y)
+            self._update_drag_rectangle_actor()
             self.vtk_widget.update()
             if self._selection_overlay is not None:
                 self._selection_overlay.update()
@@ -438,8 +449,10 @@ if VTK_AVAILABLE:
             if interactor is None:
                 return False
             x, y = interactor.GetEventPosition()
-            self._selection_end = (int(x), int(y))
+            qt_x, qt_y = self._display_to_qt_coords(x, y)
+            self._selection_end = (qt_x, qt_y)
             self._selection_drag_active = False
+            self._clear_drag_rectangle_actor()
             self._apply_rectangle_selection()
             self.vtk_widget.update()
             if self._selection_overlay is not None:
@@ -453,6 +466,7 @@ if VTK_AVAILABLE:
                     self._selection_drag_active = True
                     self._selection_start = (pos.x(), pos.y())
                     self._selection_end = (pos.x(), pos.y())
+                    self._update_drag_rectangle_actor()
                     self.vtk_widget.update()
                     if self._selection_overlay is not None:
                         self._selection_overlay.update()
@@ -460,6 +474,7 @@ if VTK_AVAILABLE:
                 if event.type() == QEvent.Type.MouseMove and self._selection_drag_active:
                     pos = event.position().toPoint()
                     self._selection_end = (pos.x(), pos.y())
+                    self._update_drag_rectangle_actor()
                     self.vtk_widget.update()
                     if self._selection_overlay is not None:
                         self._selection_overlay.update()
@@ -468,6 +483,7 @@ if VTK_AVAILABLE:
                     pos = event.position().toPoint()
                     self._selection_end = (pos.x(), pos.y())
                     self._selection_drag_active = False
+                    self._clear_drag_rectangle_actor()
                     self._apply_rectangle_selection()
                     self.vtk_widget.update()
                     if self._selection_overlay is not None:
@@ -478,6 +494,7 @@ if VTK_AVAILABLE:
         def _apply_rectangle_selection(self):
             if self._selection_start is None or self._selection_end is None:
                 self._selected_preview_indices = np.empty((0,), dtype=np.int32)
+                self._drag_preview_indices = np.empty((0,), dtype=np.int32)
                 self._rebuild_scene(preserve_camera=True)
                 return
 
@@ -491,17 +508,13 @@ if VTK_AVAILABLE:
             preview_points = self._preview_points_cache
             if len(preview_points) == 0 or rect.width() == 0 or rect.height() == 0:
                 self._selected_preview_indices = np.empty((0,), dtype=np.int32)
+                self._drag_preview_indices = np.empty((0,), dtype=np.int32)
                 self._selection_uv_rect = None
                 self.selection_changed.emit(None)
                 self._rebuild_scene(preserve_camera=True)
                 return
 
-            top_left_uv = self._display_to_uv(rect.left(), rect.top())
-            bottom_right_uv = self._display_to_uv(rect.right(), rect.bottom())
-            u_min = min(float(top_left_uv[0]), float(bottom_right_uv[0]))
-            u_max = max(float(top_left_uv[0]), float(bottom_right_uv[0]))
-            v_min = min(float(top_left_uv[1]), float(bottom_right_uv[1]))
-            v_max = max(float(top_left_uv[1]), float(bottom_right_uv[1]))
+            selected_indices, u_min, u_max, v_min, v_max = self._compute_preview_selection_from_rect(rect)
             self._selection_uv_rect = {
                 "left_up": {
                     "u": u_min,
@@ -513,16 +526,29 @@ if VTK_AVAILABLE:
                 },
             }
 
-            selected_indices = []
-            for idx, point in enumerate(preview_points):
-                u = float(point[0])
-                v = float(point[1])
-                if u_min <= u <= u_max and v_min <= v <= v_max:
-                    selected_indices.append(idx)
-
-            self._selected_preview_indices = np.asarray(selected_indices, dtype=np.int32)
+            self._selected_preview_indices = np.empty((0,), dtype=np.int32)
+            self._drag_preview_indices = np.empty((0,), dtype=np.int32)
             self.selection_changed.emit(self._selection_uv_rect)
             self._rebuild_scene(preserve_camera=True)
+
+        def _compute_preview_selection_from_rect(self, rect):
+            top_left_uv = self._display_to_uv(rect.left(), rect.top())
+            bottom_right_uv = self._display_to_uv(rect.right(), rect.bottom())
+            u_min = min(float(top_left_uv[0]), float(bottom_right_uv[0]))
+            u_max = max(float(top_left_uv[0]), float(bottom_right_uv[0]))
+            v_min = min(float(top_left_uv[1]), float(bottom_right_uv[1]))
+            v_max = max(float(top_left_uv[1]), float(bottom_right_uv[1]))
+
+            preview_points = self._preview_points_cache
+            if len(preview_points) == 0:
+                return np.empty((0,), dtype=np.int32), u_min, u_max, v_min, v_max
+
+            selection_mask = (
+                (preview_points[:, 0] >= u_min) & (preview_points[:, 0] <= u_max) &
+                (preview_points[:, 1] >= v_min) & (preview_points[:, 1] <= v_max)
+            )
+            selected_indices = np.flatnonzero(selection_mask).astype(np.int32)
+            return selected_indices, u_min, u_max, v_min, v_max
 
         def _world_to_display(self, point):
             self.renderer.SetWorldPoint(float(point[0]), float(point[1]), float(point[2]), 1.0)
@@ -534,19 +560,26 @@ if VTK_AVAILABLE:
             if camera is None:
                 return np.array([0.0, 0.0], dtype=np.float64)
 
-            focal_u, focal_v, _ = camera.GetFocalPoint()
-            parallel_scale = max(float(camera.GetParallelScale()), 1e-6)
-            widget_width = max(float(self.vtk_widget.width()), 1.0)
-            widget_height = max(float(self.vtk_widget.height()), 1.0)
-            aspect = widget_width / widget_height
-            half_width = parallel_scale * aspect
-            half_height = parallel_scale
+            display_x, display_y = self._qt_to_display_coords(x, y)
+            self.renderer.SetWorldPoint(*camera.GetFocalPoint(), 1.0)
+            self.renderer.WorldToDisplay()
+            focal_depth = self.renderer.GetDisplayPoint()[2]
 
-            u = (float(x) / widget_width) * (2.0 * half_width) + (focal_u - half_width)
-            v = ((widget_height - float(y)) / widget_height) * (2.0 * half_height) + (focal_v - half_height)
-            return np.array([u, v], dtype=np.float64)
+            self.renderer.SetDisplayPoint(float(display_x), float(display_y), float(focal_depth))
+            self.renderer.DisplayToWorld()
+            world_point = self.renderer.GetWorldPoint()
+            if world_point[3] == 0.0:
+                return np.array([0.0, 0.0], dtype=np.float64)
+            return np.array([
+                float(world_point[0]) / float(world_point[3]),
+                float(world_point[1]) / float(world_point[3]),
+            ], dtype=np.float64)
 
         def _build_scene(self, preserve_camera=False):
+            saved_camera_state = None
+            if preserve_camera:
+                saved_camera_state = self._capture_camera_state()
+
             preview_points, preview_colors = self._compute_preview_points()
             self._preview_points_cache = preview_points
             self._preview_colors_cache = preview_colors
@@ -555,9 +588,10 @@ if VTK_AVAILABLE:
                     preview_colors = np.full((len(preview_points), 3), 1.0, dtype=np.float32)
                 else:
                     preview_colors = np.asarray(preview_colors, dtype=np.float32).copy()
-                if len(self._selected_preview_indices) > 0:
-                    valid_indices = self._selected_preview_indices[
-                        (self._selected_preview_indices >= 0) & (self._selected_preview_indices < len(preview_colors))
+                highlight_indices = self._drag_preview_indices if self._selection_drag_active else np.empty((0,), dtype=np.int32)
+                if len(highlight_indices) > 0:
+                    valid_indices = highlight_indices[
+                        (highlight_indices >= 0) & (highlight_indices < len(preview_colors))
                     ]
                     if len(valid_indices) > 0:
                         preview_colors[valid_indices] = self._highlight_color
@@ -582,7 +616,37 @@ if VTK_AVAILABLE:
                 self.renderer.ResetCamera()
                 self._apply_parallel_scale_from_bounds()
             else:
+                self._restore_camera_state(saved_camera_state)
                 self.renderer.ResetCameraClippingRange()
+
+        def _capture_camera_state(self):
+            camera = self.renderer.GetActiveCamera()
+            if camera is None:
+                return None
+            return {
+                "position": tuple(camera.GetPosition()),
+                "focal_point": tuple(camera.GetFocalPoint()),
+                "view_up": tuple(camera.GetViewUp()),
+                "parallel_projection": bool(camera.GetParallelProjection()),
+                "parallel_scale": float(camera.GetParallelScale()),
+                "clipping_range": tuple(camera.GetClippingRange()),
+            }
+
+        def _restore_camera_state(self, state):
+            if not state:
+                return
+            camera = self.renderer.GetActiveCamera()
+            if camera is None:
+                camera = vtk.vtkCamera()
+                self.renderer.SetActiveCamera(camera)
+            camera.SetPosition(*state["position"])
+            camera.SetFocalPoint(*state["focal_point"])
+            camera.SetViewUp(*state["view_up"])
+            camera.SetParallelProjection(state["parallel_projection"])
+            camera.SetParallelScale(max(state["parallel_scale"], 1e-6))
+            clipping_range = state.get("clipping_range")
+            if clipping_range is not None:
+                camera.SetClippingRange(*clipping_range)
 
         def _compute_preview_points(self):
             if len(self._layer_points) == 0:
@@ -713,6 +777,116 @@ if VTK_AVAILABLE:
                 self.renderer.RemoveActor(self._selection_rectangle_actor)
                 self._selection_rectangle_actor = None
 
+        def _clear_drag_rectangle_actor(self):
+            if self._drag_rectangle_actor is not None:
+                self.renderer.RemoveActor2D(self._drag_rectangle_actor)
+                self._drag_rectangle_actor = None
+
+        def _update_drag_rectangle_actor(self):
+            if not self._selection_drag_active or self._selection_start is None or self._selection_end is None:
+                self._drag_preview_indices = np.empty((0,), dtype=np.int32)
+                self._clear_drag_rectangle_actor()
+                self._rebuild_scene(preserve_camera=True)
+                self.vtk_widget.GetRenderWindow().Render()
+                return
+
+            rect = self._selection_rect()
+            if rect.isNull() or rect.width() <= 0 or rect.height() <= 0:
+                self._drag_preview_indices = np.empty((0,), dtype=np.int32)
+                self._clear_drag_rectangle_actor()
+                self._rebuild_scene(preserve_camera=True)
+                self.vtk_widget.GetRenderWindow().Render()
+                return
+
+            drag_indices, _, _, _, _ = self._compute_preview_selection_from_rect(rect)
+            self._drag_preview_indices = drag_indices
+            self._rebuild_scene(preserve_camera=True)
+
+            points = vtk.vtkPoints()
+            display_top = self._qt_to_display_y(rect.top())
+            display_bottom = self._qt_to_display_y(rect.bottom())
+            left_display, _ = self._qt_to_display_coords(rect.left(), rect.top())
+            right_display, _ = self._qt_to_display_coords(rect.right(), rect.top())
+            rectangle_points = [
+                (left_display, display_top, 0.0),
+                (right_display, display_top, 0.0),
+                (right_display, display_bottom, 0.0),
+                (left_display, display_bottom, 0.0),
+                (left_display, display_top, 0.0),
+            ]
+            for point in rectangle_points:
+                points.InsertNextPoint(*point)
+
+            poly_line = vtk.vtkPolyLine()
+            poly_line.GetPointIds().SetNumberOfIds(len(rectangle_points))
+            for index in range(len(rectangle_points)):
+                poly_line.GetPointIds().SetId(index, index)
+
+            cells = vtk.vtkCellArray()
+            cells.InsertNextCell(poly_line)
+
+            poly_data = vtk.vtkPolyData()
+            poly_data.SetPoints(points)
+            poly_data.SetLines(cells)
+
+            coordinate = vtk.vtkCoordinate()
+            coordinate.SetCoordinateSystemToDisplay()
+
+            mapper = vtk.vtkPolyDataMapper2D()
+            mapper.SetInputData(poly_data)
+            mapper.SetTransformCoordinate(coordinate)
+
+            if self._drag_rectangle_actor is None:
+                self._drag_rectangle_actor = vtk.vtkActor2D()
+                self._drag_rectangle_actor.GetProperty().SetColor(1.0, 1.0, 1.0)
+                self._drag_rectangle_actor.GetProperty().SetLineWidth(2.0)
+                self.renderer.AddActor2D(self._drag_rectangle_actor)
+
+            self._drag_rectangle_actor.SetMapper(mapper)
+            self.vtk_widget.GetRenderWindow().Render()
+
+        def _display_to_qt_coords(self, x, y):
+            render_window = self.vtk_widget.GetRenderWindow()
+            rw_w, rw_h = render_window.GetSize() if render_window is not None else (0, 0)
+            widget_w = max(int(self.vtk_widget.width()), 1)
+            widget_h = max(int(self.vtk_widget.height()), 1)
+            scale_x = float(rw_w) / float(widget_w) if rw_w > 0 else 1.0
+            scale_y = float(rw_h) / float(widget_h) if rw_h > 0 else 1.0
+            qt_x = int(round(float(x) / max(scale_x, 1e-6)))
+            qt_y = self._display_to_qt_y(y)
+            return max(0, min(widget_w - 1, qt_x)), max(0, min(widget_h - 1, qt_y))
+
+        def _display_to_qt_y(self, y):
+            render_window = self.vtk_widget.GetRenderWindow()
+            _, rw_h = render_window.GetSize() if render_window is not None else (0, 0)
+            widget_height = max(int(self.vtk_widget.height()), 1)
+            scale_y = float(rw_h) / float(widget_height) if rw_h > 0 else 1.0
+            qt_y = int(round((float(rw_h - 1 - int(y)) / max(scale_y, 1e-6)))) if rw_h > 0 else (widget_height - 1 - int(y))
+            return max(0, min(widget_height - 1, qt_y))
+
+        def _qt_to_display_coords(self, x, y):
+            render_window = self.vtk_widget.GetRenderWindow()
+            rw_w, rw_h = render_window.GetSize() if render_window is not None else (0, 0)
+            widget_w = max(int(self.vtk_widget.width()), 1)
+            widget_h = max(int(self.vtk_widget.height()), 1)
+            scale_x = float(rw_w) / float(widget_w) if rw_w > 0 else 1.0
+            scale_y = float(rw_h) / float(widget_h) if rw_h > 0 else 1.0
+            display_x = int(round(float(x) * scale_x))
+            display_y = self._qt_to_display_y(y)
+            if rw_w > 0:
+                display_x = max(0, min(rw_w - 1, display_x))
+            return display_x, display_y
+
+        def _qt_to_display_y(self, y):
+            render_window = self.vtk_widget.GetRenderWindow()
+            _, rw_h = render_window.GetSize() if render_window is not None else (0, 0)
+            widget_height = max(int(self.vtk_widget.height()), 1)
+            scale_y = float(rw_h) / float(widget_height) if rw_h > 0 else 1.0
+            display_y = int(round((float(widget_height - 1 - int(y)) * scale_y)))
+            if rw_h > 0:
+                display_y = max(0, min(rw_h - 1, display_y))
+            return display_y
+
         def _make_axis_label_actor(self, point, text, color, offset=(6, 6)):
             coord = self._world_to_display(point)
             label = vtk.vtkTextActor()
@@ -725,11 +899,15 @@ if VTK_AVAILABLE:
             return label
 
         def _rebuild_scene(self, preserve_camera=False):
+            saved_camera_state = self._capture_camera_state() if preserve_camera else None
             self.renderer.RemoveAllViewProps()
             self._clear_edge_axes_overlay()
+            self._clear_drag_rectangle_actor()
             self._clear_selection_corner_labels()
             self._clear_selection_rectangle_actor()
             self._build_scene(preserve_camera=preserve_camera)
+            if preserve_camera:
+                self._restore_camera_state(saved_camera_state)
             self._add_selection_rectangle()
             self._add_selection_corner_labels()
             self.vtk_widget.GetRenderWindow().Render()
@@ -805,7 +983,7 @@ if VTK_AVAILABLE:
         def resizeEvent(self, event):
             super().resizeEvent(event)
             if self._selection_overlay is not None:
-                self._selection_overlay.setGeometry(self.vtk_widget.geometry())
+                self._selection_overlay.setGeometry(self.vtk_widget.rect())
                 self._selection_overlay.raise_()
                 self._selection_overlay.update()
             if hasattr(self, "renderer"):
@@ -815,7 +993,7 @@ if VTK_AVAILABLE:
         def showEvent(self, event):
             super().showEvent(event)
             if self._selection_overlay is not None:
-                self._selection_overlay.setGeometry(self.vtk_widget.geometry())
+                self._selection_overlay.setGeometry(self.vtk_widget.rect())
                 self._selection_overlay.raise_()
                 self._selection_overlay.show()
                 self._selection_overlay.update()
@@ -875,6 +1053,9 @@ if VTK_AVAILABLE:
 
 class CrossSectionPanel(QWidget):
     cross_section_created = Signal(object)
+    points_transfer_requested = Signal(str, str, object)
+    transfer_undo_requested = Signal()
+    transfer_redo_requested = Signal()
 
     def __init__(self, viewport, layer_manager, parent=None):
         super().__init__(parent)
@@ -885,9 +1066,26 @@ class CrossSectionPanel(QWidget):
         self._preview_widget = None
         self._plane_offset = 0.0
         self._selection_uv_bounds = None
+        self._transfer_in_progress = False
+        self._undo_available = False
+        self._redo_available = False
         
 
-        layout = QVBoxLayout(self)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setFrameShape(QFrame.NoFrame)
+        outer_layout.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 10)
 
         if not VTK_AVAILABLE:
@@ -903,7 +1101,7 @@ class CrossSectionPanel(QWidget):
         # Normal rich UI (kept minimal here because heavy logic lives in the viewport)
 
         self._status_label = QLabel(
-            "Select a point cloud and then define the cross section."
+            "Define the cross section to preview all visible point clouds."
         )
         self._status_label.setWordWrap(True)
         layout.addWidget(self._status_label)
@@ -913,10 +1111,9 @@ class CrossSectionPanel(QWidget):
         self._define_normal_btn.setEnabled(False)  # disabled until valid layer
         layout.addWidget(self._define_normal_btn)
 
-        self._select_point_btn = QPushButton("Select Point")
-        self._select_point_btn.setCheckable(True)
-        self._select_point_btn.setEnabled(False)
-        layout.addWidget(self._select_point_btn)
+        self._clear_normal_demo_btn = QPushButton("Clear Screen")
+        self._clear_normal_demo_btn.setEnabled(False)
+        layout.addWidget(self._clear_normal_demo_btn)
 
         thickness_row = QHBoxLayout()
         thickness_row.addWidget(QLabel("Distance range:"))
@@ -946,6 +1143,26 @@ class CrossSectionPanel(QWidget):
         self._selection_uv_label.setWordWrap(True)
         layout.addWidget(self._selection_uv_label)
 
+        transfer_row = QHBoxLayout()
+        transfer_row.addWidget(QLabel("From (layer):"))
+        self._from_layer_combo = QComboBox(self)
+        transfer_row.addWidget(self._from_layer_combo)
+        transfer_row.addWidget(QLabel("To (layer):"))
+        self._to_layer_combo = QComboBox(self)
+        transfer_row.addWidget(self._to_layer_combo)
+        layout.addLayout(transfer_row)
+
+        transfer_actions_row = QHBoxLayout()
+        self._undo_transfer_btn = QPushButton("↶")
+        self._undo_transfer_btn.setEnabled(False)
+        self._redo_transfer_btn = QPushButton("↷")
+        self._redo_transfer_btn.setEnabled(False)
+        self._undo_transfer_btn.setToolTip("Undo transfer")
+        self._redo_transfer_btn.setToolTip("Redo transfer")
+        transfer_actions_row.addWidget(self._undo_transfer_btn)
+        transfer_actions_row.addWidget(self._redo_transfer_btn)
+        layout.addLayout(transfer_actions_row)
+
         preview_label = QLabel("Preview")
         layout.addWidget(preview_label)
 
@@ -953,9 +1170,12 @@ class CrossSectionPanel(QWidget):
         self._preview_widget.setMinimumHeight(280)
         layout.addWidget(self._preview_widget, 1)
         self._preview_widget.selection_changed.connect(self._on_preview_selection_changed)
+        self._preview_widget.set_selection_mode_enabled(True)
 
         self._define_normal_btn.clicked.connect(self._on_define_normal)
-        self._select_point_btn.toggled.connect(self._on_select_point_toggled)
+        self._clear_normal_demo_btn.clicked.connect(self._on_clear_normal_demo)
+        self._undo_transfer_btn.clicked.connect(self.transfer_undo_requested.emit)
+        self._redo_transfer_btn.clicked.connect(self.transfer_redo_requested.emit)
         if hasattr(self.viewport, "cross_section_mode_changed"):
             self.viewport.cross_section_mode_changed.connect(self._on_pick_mode_changed)
 
@@ -973,6 +1193,21 @@ class CrossSectionPanel(QWidget):
         self._backward_shortcut.setContext(Qt.ApplicationShortcut)
         self._backward_shortcut.activated.connect(lambda: self._move_plane(-1.0))
 
+        self._undo_transfer_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self._undo_transfer_shortcut.setContext(Qt.ApplicationShortcut)
+        self._undo_transfer_shortcut.activated.connect(self._undo_transfer_btn.click)
+
+        self._redo_transfer_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self._redo_transfer_shortcut.setContext(Qt.ApplicationShortcut)
+        self._redo_transfer_shortcut.activated.connect(self._redo_transfer_btn.click)
+
+        self.layer_manager.layer_added.connect(self._refresh_transfer_layer_options)
+        self.layer_manager.layer_removed.connect(self._refresh_transfer_layer_options)
+        self.layer_manager.layer_modified.connect(self._refresh_transfer_layer_options)
+        self.layer_manager.selection_changed.connect(lambda _layer: self._refresh_transfer_layer_options())
+
+        self._refresh_transfer_layer_options()
+
         layout.addStretch()
 
     def _show_vtk_error(self):
@@ -983,11 +1218,50 @@ class CrossSectionPanel(QWidget):
         if self._preview_widget is not None and hasattr(self._preview_widget, "shutdown_vtk"):
             self._preview_widget.shutdown_vtk()
 
+    def _get_preview_layers(self):
+        layers = []
+        for layer in self.layer_manager.point_clouds.values():
+            if not getattr(layer, "visible", True):
+                continue
+            layers.append(layer)
+        return layers
+
+    def _combine_preview_points_and_colors(self, layers):
+        if not layers:
+            return np.empty((0, 3), dtype=np.float32), None
+
+        point_chunks = []
+        color_chunks = []
+        has_any_colors = False
+
+        for layer in layers:
+            points = getattr(layer, "points", None)
+            if points is None or len(points) == 0:
+                continue
+            point_chunks.append(np.asarray(points, dtype=np.float32))
+            colors = self.viewport.get_cross_section_preview_colors(layer)
+            if colors is None:
+                colors = np.full((len(points), 3), 0.6, dtype=np.float32)
+            else:
+                colors = np.asarray(colors, dtype=np.float32)
+                has_any_colors = True
+            color_chunks.append(colors)
+
+        if not point_chunks:
+            return np.empty((0, 3), dtype=np.float32), None
+
+        combined_points = np.concatenate(point_chunks, axis=0)
+        combined_colors = np.concatenate(color_chunks, axis=0) if color_chunks else None
+        if not has_any_colors:
+            combined_colors = None
+        return combined_points, combined_colors
+
     def refresh_preview(self):
         if self._preview_widget is None:
             return
 
-        if not isinstance(self._current_layer, PointCloudLayer) or not getattr(self._current_layer, "visible", True):
+        preview_layers = self._get_preview_layers()
+        if not preview_layers:
             self._preview_widget.set_preview_data(
                 np.empty((0, 3), dtype=np.float32),
                 None,
@@ -1003,12 +1277,16 @@ class CrossSectionPanel(QWidget):
         if len(points) < 2 or direction_xy is None:
             return
 
+        preview_points, preview_colors = self._combine_preview_points_and_colors(preview_layers)
+
         self._preview_widget.set_preview_data(
-            self._current_layer.points,
-            self.viewport.get_cross_section_preview_colors(self._current_layer),
+            preview_points,
+            preview_colors,
             self._get_shifted_plane_origin(points, direction_xy),
             np.asarray(direction_xy, dtype=np.float32),
             self._thickness_spin.value(),
+            preserve_selection=True,
+            preserve_camera=True,
         )
 
     # Keep compatibility methods used by MainWindow; the heavy interactivity is
@@ -1018,20 +1296,27 @@ class CrossSectionPanel(QWidget):
     
     def set_current_layer(self, layer):
         self._current_layer = layer
+        self._refresh_transfer_layer_options()
 
         if isinstance(layer, PointCloudLayer):
             self._status_label.setText(f"Selected: {layer.name}")
             self._define_normal_btn.setEnabled(True)
-            self._select_point_btn.setEnabled(True)
             self.viewport.enable_cross_section_mode(layer)
+            self._enable_preview_selection()
         else:
-            self._status_label.setText("Select a point cloud")
-            self._define_normal_btn.setEnabled(False)
-            self._select_point_btn.setEnabled(False)
-            self._select_point_btn.setChecked(False)
+            state = self.viewport.get_cross_section_state() if hasattr(self.viewport, "get_cross_section_state") else {}
+            has_defined_normal = (
+                len(state.get("direction_points", [])) >= 2 and
+                state.get("direction_xy") is not None
+            )
+            self._status_label.setText(
+                "Define the cross section to preview all visible point clouds."
+                if not has_defined_normal else
+                "Cross section preview is active for all visible point clouds."
+            )
+            self._define_normal_btn.setEnabled(has_defined_normal)
             self._normal_pick_mode_active = False
             self._update_define_normal_button()
-            self.viewport.disable_cross_section_mode()
             return
 
         self._normal_pick_mode_active = False
@@ -1040,15 +1325,10 @@ class CrossSectionPanel(QWidget):
         self.viewport.set_cross_section_plane_offset(self._plane_offset)
         self._update_define_normal_button()
 
-    def _on_select_point_toggled(self, checked):
+    def _enable_preview_selection(self):
         if self._preview_widget is None:
             return
-        self._preview_widget.set_selection_mode_enabled(checked)
-        if checked:
-            self._status_label.setText("Select point mode: left-drag in preview to highlight points inside the rectangle.")
-        elif isinstance(self._current_layer, PointCloudLayer) and not self._normal_pick_mode_active:
-            self._status_label.setText(f"Selected: {self._current_layer.name}")
-            self._selection_uv_label.setText("Selection UV: -")
+        self._preview_widget.set_selection_mode_enabled(True)
 
     def _on_preview_selection_changed(self, selection_uv_rect):
         self._selection_uv_bounds = selection_uv_rect
@@ -1065,12 +1345,79 @@ class CrossSectionPanel(QWidget):
             f"left-up (u={left_up['u']:.3f}, v={left_up['v']:.3f}), "
             f"right-bottom (u={right_bottom['u']:.3f}, v={right_bottom['v']:.3f})"
         )
-        
-    def _on_define_normal(self):
-        if not isinstance(self._current_layer, PointCloudLayer):
+        self._transfer_selected_points()
+
+    def _refresh_transfer_layer_options(self):
+        if not hasattr(self, "_from_layer_combo") or not hasattr(self, "_to_layer_combo"):
             return
 
-        self.viewport.enable_cross_section_mode(self._current_layer)
+        current_from = self._from_layer_combo.currentData()
+        current_to = self._to_layer_combo.currentData()
+
+        options = []
+        for layer in self.layer_manager.point_clouds.values():
+            if not getattr(layer, "visible", True):
+                continue
+            for mask_group in layer.mask_groups:
+                options.append((f"{layer.name} / {mask_group.positive_name}", mask_group.positive_name))
+                options.append((f"{layer.name} / {mask_group.negative_name}", mask_group.negative_name))
+
+        self._from_layer_combo.blockSignals(True)
+        self._to_layer_combo.blockSignals(True)
+        self._from_layer_combo.clear()
+        self._to_layer_combo.clear()
+        self._from_layer_combo.addItem("Select source", None)
+        self._to_layer_combo.addItem("Select target", None)
+        for label, value in options:
+            self._from_layer_combo.addItem(label, value)
+            self._to_layer_combo.addItem(label, value)
+
+        self._restore_combo_selection(self._from_layer_combo, current_from)
+        self._restore_combo_selection(self._to_layer_combo, current_to)
+        self._from_layer_combo.blockSignals(False)
+        self._to_layer_combo.blockSignals(False)
+
+    def _restore_combo_selection(self, combo, value):
+        if value is None:
+            combo.setCurrentIndex(0)
+            return
+        index = combo.findData(value)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _transfer_selected_points(self):
+        if self._transfer_in_progress:
+            return
+
+        from_layer = self._from_layer_combo.currentData() if hasattr(self, "_from_layer_combo") else None
+        to_layer = self._to_layer_combo.currentData() if hasattr(self, "_to_layer_combo") else None
+        if not from_layer or not to_layer or from_layer == to_layer:
+            return
+
+        selected_indices = getattr(self.viewport, "_cross_section_selected_point_indices", None)
+        if selected_indices is None or len(selected_indices) == 0:
+            return
+
+        self._transfer_in_progress = True
+        try:
+            self.points_transfer_requested.emit(from_layer, to_layer, np.asarray(selected_indices, dtype=np.int32).copy())
+            self.refresh_preview()
+        finally:
+            self._transfer_in_progress = False
+
+    def set_transfer_history_state(self, can_undo, can_redo):
+        self._undo_available = bool(can_undo)
+        self._redo_available = bool(can_redo)
+        if hasattr(self, "_undo_transfer_btn"):
+            self._undo_transfer_btn.setEnabled(self._undo_available)
+        if hasattr(self, "_redo_transfer_btn"):
+            self._redo_transfer_btn.setEnabled(self._redo_available)
+        
+    def _on_define_normal(self):
+        target_layer = self._current_layer if isinstance(self._current_layer, PointCloudLayer) else self.layer_manager.first_point_cloud()
+        if not isinstance(target_layer, PointCloudLayer):
+            return
+
+        self.viewport.enable_cross_section_mode(target_layer)
         self.viewport.begin_cross_section_pick_session(
             mode="direction",
             clear_existing=True,
@@ -1084,6 +1431,38 @@ class CrossSectionPanel(QWidget):
         )
         self._update_define_normal_button()
 
+    def _on_clear_normal_demo(self):
+        if not self._get_preview_layers():
+            return
+
+        self._normal_pick_mode_active = False
+        self._plane_offset = 0.0
+        self._update_offset_label()
+        self._selection_uv_bounds = None
+        self._selection_uv_label.setText("Selection UV: -")
+
+        if hasattr(self.viewport, "end_cross_section_pick_session"):
+            self.viewport.end_cross_section_pick_session()
+        if hasattr(self.viewport, "clear_cross_section_direction_points"):
+            self.viewport.clear_cross_section_direction_points()
+        if hasattr(self.viewport, "clear_cross_section_reference_point"):
+            self.viewport.clear_cross_section_reference_point()
+        if hasattr(self.viewport, "set_cross_section_preview_selection"):
+            self.viewport.set_cross_section_preview_selection(None)
+        self.viewport.set_cross_section_plane_offset(0.0)
+
+        if self._preview_widget is not None:
+            self._preview_widget.set_preview_data(
+                np.empty((0, 3), dtype=np.float32),
+                None,
+                np.zeros(3, dtype=np.float32),
+                np.array([1.0, 0.0], dtype=np.float32),
+                self._thickness_spin.value(),
+            )
+
+        self._status_label.setText("Define the cross section to preview all visible point clouds.")
+        self._update_define_normal_button()
+
     def _on_pick_mode_changed(self, mode):
         state = self.viewport.get_cross_section_state()
         self._normal_pick_mode_active = bool(
@@ -1095,24 +1474,20 @@ class CrossSectionPanel(QWidget):
             not self._normal_pick_mode_active
         )
 
-        if isinstance(self._current_layer, PointCloudLayer):
-            if self._normal_pick_mode_active:
-                self._status_label.setText(
-                    "Normal selection mode: click two points to form a normal. Right-click cancels. (noted that you can not click point under orbit view)"
-                )
-            else:
-                self._status_label.setText(f"Selected: {self._current_layer.name}")
+        if self._normal_pick_mode_active:
+            self._status_label.setText(
+                "Normal selection mode: click two points to form a normal. Right-click cancels. (noted that you can not click point under orbit view)"
+            )
+        elif has_completed_normal:
+            self._status_label.setText("Cross section preview is active for all visible point clouds.")
 
         self._update_define_normal_button()
         if has_completed_normal:
             self._on_preview_cross_section()
 
     def _on_preview_cross_section(self):
-        if not isinstance(self._current_layer, PointCloudLayer):
-            return
-
-        if not getattr(self._current_layer, "visible", True):
-            self.refresh_preview()
+        preview_layers = self._get_preview_layers()
+        if not preview_layers:
             return
 
         state = self.viewport.get_cross_section_state()
@@ -1131,9 +1506,11 @@ class CrossSectionPanel(QWidget):
         plane_normal_xy = direction_xy.astype(np.float32)
         plane_origin[:2] += plane_normal_xy * self._plane_offset
 
+        preview_points, preview_colors = self._combine_preview_points_and_colors(preview_layers)
+
         self._preview_widget.set_preview_data(
-            self._current_layer.points,
-            self.viewport.get_cross_section_preview_colors(self._current_layer),
+            preview_points,
+            preview_colors,
             plane_origin,
             plane_normal_xy,
             self._thickness_spin.value(),
@@ -1141,7 +1518,7 @@ class CrossSectionPanel(QWidget):
 
     def _on_thickness_value_changed(self, value):
         self.viewport.set_cross_section_thickness(value)
-        if not isinstance(self._current_layer, PointCloudLayer) or self._preview_widget is None:
+        if self._preview_widget is None:
             return
 
         state = self.viewport.get_cross_section_state()
@@ -1163,7 +1540,7 @@ class CrossSectionPanel(QWidget):
             self._offset_label.setText(f"Plane offset: {self._plane_offset:.2f}")
 
     def _move_plane(self, direction_sign):
-        if not isinstance(self._current_layer, PointCloudLayer):
+        if not self._get_preview_layers():
             return
         state = self.viewport.get_cross_section_state()
         points = state.get("direction_points", [])
@@ -1191,6 +1568,14 @@ class CrossSectionPanel(QWidget):
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.KeyPress:
             key = event.key()
+            modifiers = event.modifiers()
+            if modifiers & Qt.ControlModifier:
+                if key == Qt.Key_Z and self.isVisible() and self.hasFocus():
+                    self._undo_transfer_btn.click()
+                    return True
+                if key == Qt.Key_Y and self.isVisible() and self.hasFocus():
+                    self._redo_transfer_btn.click()
+                    return True
             if key == Qt.Key_W:
                 self._move_plane(1.0)
                 return True
@@ -1202,18 +1587,18 @@ class CrossSectionPanel(QWidget):
     def _update_define_normal_button(self):
         if not hasattr(self, "_define_normal_btn"):
             return
-        if not isinstance(self._current_layer, PointCloudLayer):
+        if not self.layer_manager.point_clouds:
             self._define_normal_btn.setText("Define Normal")
             self._define_normal_btn.setEnabled(False)
-            if hasattr(self, "_select_point_btn"):
-                self._select_point_btn.setEnabled(False)
+            if hasattr(self, "_clear_normal_demo_btn"):
+                self._clear_normal_demo_btn.setEnabled(False)
             return
 
         self._define_normal_btn.setEnabled(not self._normal_pick_mode_active)
         self._define_normal_btn.setText(
             "Selecting Normal..." if self._normal_pick_mode_active else "Define Normal"
         )
-        if hasattr(self, "_select_point_btn"):
-            self._select_point_btn.setEnabled(True)
+        if hasattr(self, "_clear_normal_demo_btn"):
+            self._clear_normal_demo_btn.setEnabled(True)
 
 
