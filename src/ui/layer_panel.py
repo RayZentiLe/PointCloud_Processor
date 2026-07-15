@@ -1,9 +1,9 @@
 import sys
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
-    QMenu, QInputDialog, QMessageBox,
+    QMenu, QInputDialog, QMessageBox, QLabel,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QPoint, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QColor
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
@@ -19,7 +19,10 @@ class LayerPanel(QWidget):
     camera_to_layer_requested = Signal(str)  
     export_requested = Signal(str, object)       # layer_id, sublayer_name|None
     delete_requested = Signal(str)               # layer_id
+    delete_layers_requested = Signal(list)
     delete_mask_requested = Signal(str, str)      # layer_id, mg_id
+    combine_layers_requested = Signal(list)
+    assign_colors_requested = Signal(list)
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
@@ -28,15 +31,36 @@ class LayerPanel(QWidget):
         lo = QVBoxLayout(self)
         lo.setContentsMargins(0, 0, 0, 0)
 
+        self._empty_hint = QLabel(
+            "No layer imported yet. Click 'Open' or drag and drop a file into the app.",
+            self,
+        )
+        self._empty_hint.setWordWrap(True)
+        self._empty_hint.setAlignment(Qt.AlignCenter)
+        self._empty_hint.setStyleSheet(
+            "color: #888; padding: 12px; border: 1px dashed #666; margin: 8px;"
+        )
+        lo.addWidget(self._empty_hint)
+
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Name", "Info"])
         self.tree.setColumnWidth(0, 200)
         self.tree.header().setStretchLastSection(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.setSelectionMode(QTreeWidget.ExtendedSelection)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setDragDropMode(QTreeWidget.InternalMove)
+        self.tree.setDefaultDropAction(Qt.MoveAction)
         self.tree.customContextMenuRequested.connect(self._ctx_menu)
         self.tree.itemChanged.connect(self._on_changed)
         self.tree.currentItemChanged.connect(self._on_sel)
+        self.tree.itemSelectionChanged.connect(self._on_item_selection_changed)
         lo.addWidget(self.tree)
+        self.tree.viewport().installEventFilter(self)
+
+        self._drag_start_pos: QPoint | None = None
 
         # top-level groups
         self._pc_grp = self._make_group("📁 Point Clouds", "pc_grp")
@@ -49,6 +73,8 @@ class LayerPanel(QWidget):
         self.lm.layer_renamed.connect(lambda _: self._rebuild())
         self.lm.mask_added.connect(lambda a, b: self._rebuild())
         self.lm.mask_removed.connect(lambda a, b: self._rebuild())
+        self.lm.layer_order_changed.connect(self._rebuild)
+        self._update_empty_hint()
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -69,6 +95,11 @@ class LayerPanel(QWidget):
     @staticmethod
     def _icon_color_for_layer(layer):
         """Derive a representative swatch colour from render_props."""
+        vis_scheme = getattr(layer, "vis_color_scheme", "Original")
+        if vis_scheme == "Solid":
+            vis_color = getattr(layer, "vis_solid_color", None)
+            if vis_color is not None:
+                return tuple(vis_color)
         cm = layer.render_props.get("color_mode", "original")
         if cm == "solid":
             return tuple(layer.render_props.get("solid_color",
@@ -84,6 +115,7 @@ class LayerPanel(QWidget):
         # Save current selection
         saved_lid = self.lm.selected_layer_id
         saved_sub = self.lm.selected_sublayer_name
+        saved_multi = set(self.lm.selected_layer_ids)
 
         # clear children
         for grp in (self._pc_grp, self._mesh_grp):
@@ -124,10 +156,12 @@ class LayerPanel(QWidget):
         self._mesh_grp.setText(1, f"{len(self.lm.meshes)} layers")
 
         self.tree.blockSignals(False)
+        self._update_empty_hint()
 
         # Restore selection
         if item_to_select is not None:
             self.tree.setCurrentItem(item_to_select)
+        self._restore_multi_selection(saved_multi, saved_lid)
 
     def _add_layer_item(self, parent, layer, is_pc):
         item = QTreeWidgetItem(parent)
@@ -191,9 +225,25 @@ class LayerPanel(QWidget):
             return
         tp = cur.data(0, _R_TYPE)
         if tp == "layer":
-            self.lm.set_selection(cur.data(0, _R_LID), None)
+            selected_ids = self._selected_layer_ids()
+            primary = cur.data(0, _R_LID)
+            if primary not in selected_ids:
+                selected_ids = [primary]
+            self.lm.set_selected_layers(selected_ids, primary, None)
         elif tp == "sub":
             self.lm.set_selection(cur.data(0, _R_LID), cur.text(0))
+
+    def _on_item_selection_changed(self):
+        current = self.tree.currentItem()
+        if current is None:
+            return
+        if current.data(0, _R_TYPE) != "layer":
+            return
+        selected_ids = self._selected_layer_ids()
+        primary = current.data(0, _R_LID)
+        if primary not in selected_ids:
+            selected_ids = [primary]
+        self.lm.set_selected_layers(selected_ids, primary, None)
 
     # ── context menu ─────────────────────────────────────────────
 
@@ -206,6 +256,11 @@ class LayerPanel(QWidget):
         menu = QMenu(self)
 
         if tp == "layer":
+            selected_ids = self._selected_layer_ids()
+            if lid not in selected_ids:
+                self.tree.setCurrentItem(item)
+                selected_ids = [lid]
+                self.lm.set_selected_layers(selected_ids, lid, None)
             layer = self.lm.get_layer(lid)
             if layer is None:
                 return
@@ -214,11 +269,20 @@ class LayerPanel(QWidget):
                            lambda: self._select_item(item))
             menu.addAction("Rename",
                            lambda: self._rename_layer(lid))
+            menu.addAction("Assign Colour",
+                           lambda ids=selected_ids: self.assign_colors_requested.emit(ids))
+            if len(selected_ids) >= 2:
+                menu.addAction("Combine Layer(s)",
+                               lambda ids=selected_ids: self.combine_layers_requested.emit(ids))
             menu.addSeparator()
             menu.addAction("Export",
                            lambda: self.export_requested.emit(lid, None))
-            menu.addAction("Delete",
-                           lambda: self.delete_requested.emit(lid))
+            if len(selected_ids) >= 2:
+                menu.addAction("Delete Selected Layer(s)",
+                               lambda ids=selected_ids: self.delete_layers_requested.emit(ids))
+            else:
+                menu.addAction("Delete",
+                               lambda: self.delete_requested.emit(lid))
 
         elif tp == "sub":
             mgid = item.data(0, _R_MGID)
@@ -248,6 +312,70 @@ class LayerPanel(QWidget):
 
     def _select_item(self, item):
         self.tree.setCurrentItem(item)
+
+    def _selected_layer_ids(self):
+        ids = []
+        for item in self.tree.selectedItems():
+            if item.data(0, _R_TYPE) == "layer":
+                ids.append(item.data(0, _R_LID))
+        return ids
+
+    def _restore_multi_selection(self, selected_ids, primary_id):
+        if not selected_ids:
+            return
+        self.tree.blockSignals(True)
+        for item in self._iter_layer_items():
+            lid = item.data(0, _R_LID)
+            item.setSelected(lid in selected_ids)
+            if lid == primary_id:
+                self.tree.setCurrentItem(item)
+        self.tree.blockSignals(False)
+
+    def _iter_layer_items(self):
+        for grp in (self._pc_grp, self._mesh_grp):
+            for i in range(grp.childCount()):
+                yield grp.child(i)
+
+    def _update_empty_hint(self):
+        has_layers = bool(self.lm.get_all_layers())
+        self._empty_hint.setVisible(not has_layers)
+        self.tree.setVisible(has_layers)
+
+    def eventFilter(self, obj, event):
+        if obj is self.tree.viewport():
+            if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self._drag_start_pos = event.pos()
+            elif event.type() == QEvent.MouseMove and self._drag_start_pos is not None:
+                if not (event.buttons() & Qt.LeftButton):
+                    return False
+                if (event.pos() - self._drag_start_pos).manhattanLength() >= 4:
+                    self._handle_manual_reorder(event.pos())
+                    self._drag_start_pos = None
+                    return True
+            elif event.type() == QEvent.MouseButtonRelease:
+                self._drag_start_pos = None
+        return super().eventFilter(obj, event)
+
+    def _handle_manual_reorder(self, pos):
+        selected_ids = self._selected_layer_ids()
+        if not selected_ids:
+            return
+        target_item = self.tree.itemAt(pos)
+        if target_item is None or target_item.data(0, _R_TYPE) != "layer":
+            return
+        target_id = target_item.data(0, _R_LID)
+        if target_id in selected_ids:
+            return
+
+        rect = self.tree.visualItemRect(target_item)
+        place_after = pos.y() > rect.center().y()
+        if len(selected_ids) == 1:
+            moved = self.lm.reorder_layer(selected_ids[0], target_id, place_after)
+        else:
+            moved = self.lm.reorder_layers(selected_ids, target_id, place_after)
+        if moved:
+            primary = self.tree.currentItem().data(0, _R_LID) if self.tree.currentItem() else selected_ids[0]
+            self.lm.set_selected_layers(selected_ids, primary, None)
 
     def _rename_layer(self, lid):
         layer = self.lm.get_layer(lid)

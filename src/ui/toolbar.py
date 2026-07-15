@@ -4,13 +4,14 @@ from PySide6.QtCore import Signal, Qt
 
 class Toolbar(QToolBar):
     open_requested = Signal()
+    undo_requested = Signal()
+    redo_requested = Signal()
     pca_requested = Signal()
     poisson_requested = Signal()
     mesh_filter_requested = Signal()
     noise_removal_requested = Signal()
     cross_section_requested = Signal()
     export_requested = Signal()
-    combine_requested = Signal()
     font_size_changed = Signal(int)  # New signal for font size changes
 
     def __init__(self, layer_manager, parent=None):
@@ -19,6 +20,8 @@ class Toolbar(QToolBar):
         self.dock_widgets = {}  # Store references to dock widgets
 
         self.addAction("📂 Open", self.open_requested.emit)
+        self.addAction("↶ Undo", self.undo_requested.emit)
+        self.addAction("↷ Redo", self.redo_requested.emit)
         self.addSeparator()
         self.addAction("PCA Filter", self.pca_requested.emit)
         self.addAction("Poisson", self.poisson_requested.emit)
@@ -26,7 +29,6 @@ class Toolbar(QToolBar):
         self.addAction("Noise Removal", self.noise_removal_requested.emit)
         self.addAction("Cross Section", self.cross_section_requested.emit)
         self.addSeparator()
-        self.addAction("Combine", self.combine_requested.emit)
         self.addAction("💾 Export", self.export_requested.emit)
         self.addSeparator()
         

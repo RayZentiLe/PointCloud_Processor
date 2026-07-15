@@ -1,11 +1,12 @@
 import os
 import sys
 import gc
+import colorsys
 import traceback
 import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog,
-    QMessageBox, QProgressBar,
+    QMessageBox, QProgressBar, QInputDialog,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QDialog
@@ -30,10 +31,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Point Cloud Processor")
         self.resize(1400, 900)
+        self.setAcceptDrops(True)
 
         self.lm = LayerManager(self)
         self._worker: TaskRunner | None = None
         self._loading_dialog: LoadingDialog | None = None
+        self._undo_stack = []
+        self._redo_stack = []
 
         self._build_ui()
         self._build_menus()
@@ -99,6 +103,7 @@ class MainWindow(QMainWindow):
         from ui.cross_section_panel import CrossSectionPanel
         self.cross_section_panel = CrossSectionPanel(self.viewport, self.lm, self)
         self.cross_section_panel.cross_section_created.connect(self._on_cross_section_created)
+        self.cross_section_panel.points_transfer_requested.connect(self._on_cross_section_points_transfer_requested)
         self.cross_section_dock = QDockWidget("Cross Section", self)
         self.cross_section_dock.setWidget(self.cross_section_panel)
         self.cross_section_dock.setMinimumWidth(320)
@@ -146,19 +151,23 @@ class MainWindow(QMainWindow):
     def _connect(self):
         tb = self.toolbar
         tb.open_requested.connect(self._open)
+        tb.undo_requested.connect(self._on_global_undo_requested)
+        tb.redo_requested.connect(self._on_global_redo_requested)
         tb.pca_requested.connect(self._run_pca)
         tb.poisson_requested.connect(self._run_poisson)
         tb.mesh_filter_requested.connect(self._run_mf)
         tb.noise_removal_requested.connect(self._run_noise)
         tb.export_requested.connect(self._export_sel)
-        tb.combine_requested.connect(self._combine_dlg)
         tb.cross_section_requested.connect(self._show_cross_section_panel)
         tb.font_size_changed.connect(self.set_app_font_size)  # Connect font size changes
 
         lp = self.layer_panel
         lp.export_requested.connect(self._export_layer)
         lp.delete_requested.connect(self._delete_layer)
+        lp.delete_layers_requested.connect(self._delete_layers)
         lp.delete_mask_requested.connect(self._delete_mask)
+        lp.combine_layers_requested.connect(self._combine_selected_layers)
+        lp.assign_colors_requested.connect(self._assign_colors_to_layers)
         lp.camera_to_layer_requested.connect(self.viewport.focus_camera_on_layer)
         
         # Connect dock widget visibility changes to toolbar menu
@@ -168,6 +177,7 @@ class MainWindow(QMainWindow):
         self.log_dock.visibilityChanged.connect(self._on_log_visibility_changed)
         self.lm.selection_changed.connect(self.on_layer_selected)
         self.lm.visibility_changed.connect(self._on_layer_visibility_changed)
+        self._update_global_undo_redo_state()
 
     # ── helpers ──────────────────────────────────────────────────
 
@@ -205,6 +215,52 @@ class MainWindow(QMainWindow):
             "Supported (*.ply *.pcd *.obj *.stl *.xyz *.txt);;All (*)")
         if not path:
             return
+        self._open_path(path)
+
+    def dragEnterEvent(self, event):
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        local_files = [url.toLocalFile() for url in mime_data.urls() if url.isLocalFile()]
+        if any(os.path.isfile(path) for path in local_files):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dropEvent(self, event):
+        mime_data = event.mimeData()
+        if mime_data is None or not mime_data.hasUrls():
+            event.ignore()
+            return
+
+        local_files = []
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = url.toLocalFile()
+            if os.path.isfile(path):
+                local_files.append(path)
+
+        if not local_files:
+            event.ignore()
+            return
+
+        loaded_count = 0
+        for path in local_files:
+            if self._open_path(path, show_error_dialog=False):
+                loaded_count += 1
+
+        if loaded_count == 0:
+            QMessageBox.warning(self, "Drop Input", "No dropped files could be loaded.")
+            event.ignore()
+            return
+
+        self.log.log(f"Dropped input: loaded {loaded_count} file(s).")
+        event.acceptProposedAction()
+
+    def _open_path(self, path, show_error_dialog=True):
         try:
             from io_utils.ply_io import load_file
             layer = load_file(path)
@@ -220,9 +276,12 @@ class MainWindow(QMainWindow):
                     f"({layer.face_count:,} faces)")
             self.lm.set_selection(layer.id)
             self.viewport.fit_all()
+            return True
         except Exception as e:
             self.log.log(f"ERROR loading: {e}")
-            QMessageBox.critical(self, "Error", str(e))
+            if show_error_dialog:
+                QMessageBox.critical(self, "Error", str(e))
+            return False
 
     def _export_sel(self):
         layer = self.lm.get_selected_layer()
@@ -291,12 +350,85 @@ class MainWindow(QMainWindow):
         if QMessageBox.question(
                 self, "Delete", f"Delete '{layer.name}'?",
                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
-            self.lm.remove_layer(lid)
-            self.log.log(f"Deleted: {layer.name}")
+            self._delete_layers_with_history([lid])
+
+    def _delete_layers(self, layer_ids):
+        layers = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen:
+                continue
+            layer = self.lm.get_layer(layer_id)
+            if layer is None:
+                continue
+            layers.append(layer)
+            seen.add(layer_id)
+        if not layers:
+            return
+        if QMessageBox.question(
+                self,
+                "Delete",
+                f"Delete {len(layers)} selected layers?",
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        self._delete_layers_with_history([layer.id for layer in layers])
+
+    def _delete_layers_with_history(self, layer_ids):
+        snapshots = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen:
+                continue
+            layer = self.lm.get_layer(layer_id)
+            if layer is None:
+                continue
+            snapshots.append(self._snapshot_layer(layer))
+            seen.add(layer_id)
+        if not snapshots:
+            return
+        for snapshot in snapshots:
+            self.lm.remove_layer(snapshot["id"])
+            self.log.log(f"Deleted: {snapshot['name']}")
+        self._undo_stack.append({
+            "type": "delete",
+            "layers": snapshots,
+        })
+        self._redo_stack.clear()
+        self._update_global_undo_redo_state()
 
     def _delete_mask(self, lid, mgid):
         self.lm.remove_mask_group(lid, mgid)
         self.log.log("Mask group deleted")
+
+    def _assign_colors_to_layers(self, layer_ids):
+        unique_ids = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen:
+                continue
+            layer = self.lm.get_layer(layer_id)
+            if layer is None:
+                continue
+            unique_ids.append(layer_id)
+            seen.add(layer_id)
+        if not unique_ids:
+            return
+
+        total = len(unique_ids)
+        for index, layer_id in enumerate(unique_ids):
+            layer = self.lm.get_layer(layer_id)
+            if layer is None:
+                continue
+            hue = (index / max(total, 1) + 0.11) % 1.0
+            sat = 0.65 + 0.2 * ((index % 2) / 1 if total > 1 else 0.5)
+            val = 0.9
+            rgb = colorsys.hsv_to_rgb(hue, min(sat, 0.9), val)
+            layer.vis_color_scheme = "Solid"
+            layer.vis_solid_color = rgb
+            layer.render_props["color_mode"] = "solid"
+            layer.render_props["solid_color"] = list(rgb)
+            self.lm.layer_modified.emit(layer.id)
+            self.log.log(f"Assigned colour to: {layer.name}")
 
     # ── PCA ──────────────────────────────────────────────────────
 
@@ -560,53 +692,51 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.Accepted:
             return
         p = dlg.get_params()
-        self._do_combine(p["layer_a_id"], p["layer_b_id"], p["name"])
+        self._do_combine([p["layer_a_id"], p["layer_b_id"]], p["name"])
 
     def _combine_two(self, lid_a, lid_b):
         a = self.lm.get_layer(lid_a)
         b = self.lm.get_layer(lid_b)
         if a and b:
-            self._do_combine(lid_a, lid_b, f"{a.name}+{b.name}")
+            self._do_combine([lid_a, lid_b], f"{a.name}+{b.name}")
 
-    def _do_combine(self, id_a, id_b, name):
-        a = self.lm.get_layer(id_a)
-        b = self.lm.get_layer(id_b)
-        if a is None or b is None:
+    def _combine_selected_layers(self, layer_ids):
+        layers = [self.lm.get_layer(layer_id) for layer_id in layer_ids]
+        layers = [layer for layer in layers if layer is not None]
+        if len(layers) < 2:
             return
+        name, ok = QInputDialog.getText(
+            self,
+            "Combine Layers",
+            "Result name:",
+            text="",
+        )
+        if not ok:
+            return
+        self._do_combine(layer_ids, name.strip())
 
-        if isinstance(a, PointCloudLayer) and isinstance(b, PointCloudLayer):
-            c = PointCloudLayer(
-                name=name,
-                points=np.vstack([a.points, b.points]),
-                modified=True)
-            if a.colors is not None and b.colors is not None:
-                c.colors = np.vstack([a.colors, b.colors])
-            elif a.colors is not None:
-                c.colors = np.vstack([
-                    a.colors, np.full((len(b.points), 3), 0.5)])
-            elif b.colors is not None:
-                c.colors = np.vstack([
-                    np.full((len(a.points), 3), 0.5), b.colors])
-            self.lm.add_point_cloud(c)
-            self.lm.set_selection(c.id)
-            self.log.log(f"Combined: {c.name} ({c.point_count:,} pts)")
-
-        elif isinstance(a, MeshLayer) and isinstance(b, MeshLayer):
-            off = len(a.vertices)
-            c = MeshLayer(
-                name=name,
-                vertices=np.vstack([a.vertices, b.vertices]),
-                faces=np.vstack([a.faces, b.faces + off]),
-                modified=True)
-            if a.vertex_colors is not None and b.vertex_colors is not None:
-                c.vertex_colors = np.vstack([
-                    a.vertex_colors, b.vertex_colors])
-            self.lm.add_mesh(c)
-            self.lm.set_selection(c.id)
-            self.log.log(f"Combined: {c.name} ({c.face_count:,} faces)")
-        else:
-            QMessageBox.warning(
-                self, "Combine", "Can only combine same-type layers.")
+    def _do_combine(self, layer_ids, name):
+        source_layers = []
+        for layer_id in layer_ids:
+            layer = self.lm.get_layer(layer_id)
+            if layer is not None:
+                source_layers.append(self._snapshot_layer(layer))
+        combined, msg = self.lm.combine_layers(layer_ids, name)
+        if combined is None:
+            QMessageBox.warning(self, "Combine", msg)
+            return
+        self._undo_stack.append({
+            "type": "combine",
+            "source_layers": source_layers,
+            "combined_layer": self._snapshot_layer(combined),
+        })
+        self._redo_stack.clear()
+        self._update_global_undo_redo_state()
+        self.lm.set_selection(combined.id)
+        if isinstance(combined, PointCloudLayer):
+            self.log.log(f"Combined: {combined.name} ({combined.point_count:,} pts)")
+        elif isinstance(combined, MeshLayer):
+            self.log.log(f"Combined: {combined.name} ({combined.face_count:,} faces)")
 
     # ── task runner ──────────────────────────────────────────────
 
@@ -718,6 +848,250 @@ class MainWindow(QMainWindow):
             # ignore malformed input
             return
 
+    def _on_cross_section_points_transfer_requested(self, from_layer, to_layer, indices):
+        layer = self.cross_section_panel._current_layer if hasattr(self, "cross_section_panel") else None
+        if not isinstance(layer, PointCloudLayer):
+            return
+
+        ok, message = self.lm.transfer_points_between_sublayers(layer.id, from_layer, to_layer, indices)
+        if not ok:
+            if message:
+                self.log.log(f"Cross Section transfer skipped: {message}")
+            return
+
+        moved_count = len(np.asarray(indices).ravel()) if indices is not None else 0
+        if moved_count > 0:
+            self._undo_stack.append({
+                "type": "transfer",
+                "layer_id": layer.id,
+                "from_layer": from_layer,
+                "to_layer": to_layer,
+                "indices": np.asarray(indices, dtype=np.int32).copy(),
+            })
+            self._redo_stack.clear()
+            self._update_cross_section_transfer_history_buttons()
+            self.log.log(
+                f"Cross Section transfer: moved {moved_count:,} pts from '{from_layer}' to '{to_layer}'"
+            )
+            self.viewport._rebuild(layer.id)
+            self.viewport._render()
+            if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
+                self.cross_section_panel.refresh_preview()
+
+    def _on_cross_section_transfer_undo_requested(self):
+        if not self._undo_stack or self._undo_stack[-1].get("type") != "transfer":
+            return
+        entry = self._undo_stack.pop()
+        ok, message = self.lm.transfer_points_between_sublayers(
+            entry["layer_id"],
+            entry["to_layer"],
+            entry["from_layer"],
+            entry["indices"],
+        )
+        if not ok:
+            if message:
+                self.log.log(f"Cross Section undo skipped: {message}")
+            self._update_cross_section_transfer_history_buttons()
+            return
+        self._redo_stack.append(entry)
+        self._update_cross_section_transfer_history_buttons()
+        self._refresh_cross_section_after_transfer(entry["layer_id"])
+        self.log.log(
+            f"Cross Section transfer undone: '{entry['to_layer']}' → '{entry['from_layer']}'"
+        )
+
+    def _on_cross_section_transfer_redo_requested(self):
+        if not self._redo_stack or self._redo_stack[-1].get("type") != "transfer":
+            return
+        entry = self._redo_stack.pop()
+        ok, message = self.lm.transfer_points_between_sublayers(
+            entry["layer_id"],
+            entry["from_layer"],
+            entry["to_layer"],
+            entry["indices"],
+        )
+        if not ok:
+            if message:
+                self.log.log(f"Cross Section redo skipped: {message}")
+            self._update_cross_section_transfer_history_buttons()
+            return
+        self._undo_stack.append(entry)
+        self._update_cross_section_transfer_history_buttons()
+        self._refresh_cross_section_after_transfer(entry["layer_id"])
+        self.log.log(
+            f"Cross Section transfer redone: '{entry['from_layer']}' → '{entry['to_layer']}'"
+        )
+
+    def _refresh_cross_section_after_transfer(self, layer_id):
+        layer = self.lm.get_layer(layer_id)
+        if isinstance(layer, PointCloudLayer):
+            self.viewport._rebuild(layer.id)
+            self.viewport._render()
+            if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
+                self.cross_section_panel.refresh_preview()
+
+    def _update_cross_section_transfer_history_buttons(self):
+        if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
+            self.cross_section_panel.set_transfer_history_state(
+                bool(self._undo_stack and self._undo_stack[-1].get("type") == "transfer"),
+                bool(self._redo_stack and self._redo_stack[-1].get("type") == "transfer"),
+            )
+        self._update_global_undo_redo_state()
+
+    def _on_global_undo_requested(self):
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack[-1]
+        if entry.get("type") == "combine":
+            self._undo_layer_edit()
+        elif entry.get("type") == "delete":
+            self._undo_delete_layers()
+        elif entry.get("type") == "transfer":
+            self._on_cross_section_transfer_undo_requested()
+
+    def _on_global_redo_requested(self):
+        if not self._redo_stack:
+            return
+        entry = self._redo_stack[-1]
+        if entry.get("type") == "combine":
+            self._redo_layer_edit()
+        elif entry.get("type") == "delete":
+            self._redo_delete_layers()
+        elif entry.get("type") == "transfer":
+            self._on_cross_section_transfer_redo_requested()
+
+    def _update_global_undo_redo_state(self):
+        if not hasattr(self, "toolbar") or self.toolbar is None:
+            return
+        can_undo = bool(self._undo_stack)
+        can_redo = bool(self._redo_stack)
+        for action in self.toolbar.actions():
+            text = action.text()
+            if text == "↶ Undo":
+                action.setEnabled(can_undo)
+            elif text == "↷ Redo":
+                action.setEnabled(can_redo)
+
+    def _snapshot_layer(self, layer):
+        data = {
+            "id": layer.id,
+            "name": layer.name,
+            "visible": layer.visible,
+            "modified": layer.modified,
+            "display_color": None if layer.display_color is None else tuple(layer.display_color),
+            "render_props": dict(layer.render_props),
+        }
+        if isinstance(layer, PointCloudLayer):
+            data.update({
+                "kind": "point_cloud",
+                "points": np.array(layer.points, copy=True),
+                "colors": None if layer.colors is None else np.array(layer.colors, copy=True),
+                "normals": None if layer.normals is None else np.array(layer.normals, copy=True),
+                "source_path": layer.source_path,
+            })
+        elif isinstance(layer, MeshLayer):
+            data.update({
+                "kind": "mesh",
+                "vertices": np.array(layer.vertices, copy=True),
+                "faces": np.array(layer.faces, copy=True),
+                "vertex_colors": None if layer.vertex_colors is None else np.array(layer.vertex_colors, copy=True),
+                "face_normals": None if layer.face_normals is None else np.array(layer.face_normals, copy=True),
+                "vertex_normals": None if layer.vertex_normals is None else np.array(layer.vertex_normals, copy=True),
+                "source_path": layer.source_path,
+            })
+        return data
+
+    def _restore_layer_from_snapshot(self, snapshot):
+        if snapshot["kind"] == "point_cloud":
+            layer = PointCloudLayer(
+                name=snapshot["name"],
+                points=np.array(snapshot["points"], copy=True),
+                colors=None if snapshot["colors"] is None else np.array(snapshot["colors"], copy=True),
+                normals=None if snapshot["normals"] is None else np.array(snapshot["normals"], copy=True),
+                source_path=snapshot.get("source_path"),
+                modified=snapshot.get("modified", False),
+            )
+            self.lm.add_point_cloud(layer)
+        else:
+            layer = MeshLayer(
+                name=snapshot["name"],
+                vertices=np.array(snapshot["vertices"], copy=True),
+                faces=np.array(snapshot["faces"], copy=True),
+                vertex_colors=None if snapshot["vertex_colors"] is None else np.array(snapshot["vertex_colors"], copy=True),
+                face_normals=None if snapshot["face_normals"] is None else np.array(snapshot["face_normals"], copy=True),
+                vertex_normals=None if snapshot["vertex_normals"] is None else np.array(snapshot["vertex_normals"], copy=True),
+                source_path=snapshot.get("source_path"),
+                modified=snapshot.get("modified", False),
+            )
+            self.lm.add_mesh(layer)
+        layer.id = snapshot["id"]
+        layer.visible = snapshot.get("visible", True)
+        layer.display_color = snapshot.get("display_color")
+        layer.render_props = dict(snapshot.get("render_props", {}))
+        if isinstance(layer, PointCloudLayer):
+            self.lm._point_clouds.pop(next(reversed(self.lm._point_clouds)))
+            self.lm._point_clouds[layer.id] = layer
+        else:
+            self.lm._meshes.pop(next(reversed(self.lm._meshes)))
+            self.lm._meshes[layer.id] = layer
+        self.lm.layer_modified.emit(layer.id)
+        return layer
+
+    def _undo_layer_edit(self):
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+        if entry.get("type") != "combine":
+            return
+        combined_snapshot = entry["combined_layer"]
+        self.lm.remove_layer(combined_snapshot["id"])
+        restored_layers = [self._restore_layer_from_snapshot(snapshot) for snapshot in entry["source_layers"]]
+        self._redo_stack.append(entry)
+        self._update_global_undo_redo_state()
+        if restored_layers:
+            self.lm.set_selected_layers([layer.id for layer in restored_layers], restored_layers[0].id)
+        self.log.log("Undo combine layer(s)")
+
+    def _redo_layer_edit(self):
+        if not self._redo_stack:
+            return
+        entry = self._redo_stack.pop()
+        if entry.get("type") != "combine":
+            return
+        for snapshot in entry["source_layers"]:
+            self.lm.remove_layer(snapshot["id"])
+        combined_layer = self._restore_layer_from_snapshot(entry["combined_layer"])
+        self._undo_stack.append(entry)
+        self._update_global_undo_redo_state()
+        self.lm.set_selection(combined_layer.id)
+        self.log.log("Redo combine layer(s)")
+
+    def _undo_delete_layers(self):
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+        if entry.get("type") != "delete":
+            return
+        restored_layers = [self._restore_layer_from_snapshot(snapshot) for snapshot in entry["layers"]]
+        self._redo_stack.append(entry)
+        self._update_global_undo_redo_state()
+        if restored_layers:
+            self.lm.set_selected_layers([layer.id for layer in restored_layers], restored_layers[0].id)
+        self.log.log("Undo delete layer(s)")
+
+    def _redo_delete_layers(self):
+        if not self._redo_stack:
+            return
+        entry = self._redo_stack.pop()
+        if entry.get("type") != "delete":
+            return
+        for snapshot in entry["layers"]:
+            self.lm.remove_layer(snapshot["id"])
+            self.log.log(f"Deleted: {snapshot['name']}")
+        self._undo_stack.append(entry)
+        self._update_global_undo_redo_state()
+        self.log.log("Redo delete layer(s)")
+
     def _on_cross_section_visibility_changed(self, visible):
         self.toolbar.cross_section_action.blockSignals(True)
         self.toolbar.cross_section_action.setChecked(visible)
@@ -781,7 +1155,5 @@ class MainWindow(QMainWindow):
         self.cross_section_panel.set_current_layer(layer)
 
     def _on_layer_visibility_changed(self, layer_id):
-        layer = self.lm.get_layer(layer_id)
-        current_layer = getattr(self.cross_section_panel, "_current_layer", None)
-        if layer is not None and current_layer is not None and layer.id == current_layer.id:
+        if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
             self.cross_section_panel.refresh_preview()

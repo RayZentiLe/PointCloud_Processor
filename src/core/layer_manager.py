@@ -13,6 +13,7 @@ class LayerManager(QObject):
     mask_removed = Signal(str, str)     # layer_id, mask_group_id
 
     selection_changed = Signal(object)
+    layer_order_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -20,6 +21,7 @@ class LayerManager(QObject):
         self._meshes: dict[str, MeshLayer] = {}
         self._selected_layer_id: str | None = None
         self._selected_sublayer_name: str | None = None
+        self._selected_layer_ids: list[str] = []
 
     # ── properties ───────────────────────────────────────────────
 
@@ -38,6 +40,10 @@ class LayerManager(QObject):
     @property
     def selected_sublayer_name(self):
         return self._selected_sublayer_name
+
+    @property
+    def selected_layer_ids(self):
+        return list(self._selected_layer_ids)
 
     # ── queries ──────────────────────────────────────────────────
 
@@ -82,6 +88,136 @@ class LayerManager(QObject):
         layer.name = self._ensure_unique_layer_name(layer.name)
         self._meshes[layer.id] = layer
         self.layer_added.emit(layer.id)
+
+    def reorder_layer(self, layer_id, target_layer_id, place_after=False):
+        source = self.get_layer(layer_id)
+        target = self.get_layer(target_layer_id)
+        if source is None or target is None:
+            return False
+        if type(source) is not type(target):
+            return False
+
+        container = self._point_clouds if isinstance(source, PointCloudLayer) else self._meshes
+        keys = list(container.keys())
+        if layer_id not in keys or target_layer_id not in keys or layer_id == target_layer_id:
+            return False
+
+        keys.remove(layer_id)
+        target_index = keys.index(target_layer_id)
+        insert_index = target_index + (1 if place_after else 0)
+        keys.insert(insert_index, layer_id)
+        reordered = {key: container[key] for key in keys}
+        container.clear()
+        container.update(reordered)
+        self.layer_order_changed.emit()
+        return True
+
+    def reorder_layers(self, layer_ids, target_layer_id, place_after=False):
+        if not layer_ids:
+            return False
+        target = self.get_layer(target_layer_id)
+        if target is None:
+            return False
+
+        unique_ids = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen:
+                continue
+            layer = self.get_layer(layer_id)
+            if layer is None or type(layer) is not type(target):
+                return False
+            unique_ids.append(layer_id)
+            seen.add(layer_id)
+
+        if target_layer_id in seen:
+            return False
+
+        container = self._point_clouds if isinstance(target, PointCloudLayer) else self._meshes
+        keys = list(container.keys())
+        if any(layer_id not in keys for layer_id in unique_ids):
+            return False
+
+        remaining = [key for key in keys if key not in seen]
+        target_index = remaining.index(target_layer_id)
+        insert_index = target_index + (1 if place_after else 0)
+        new_keys = remaining[:insert_index] + unique_ids + remaining[insert_index:]
+        reordered = {key: container[key] for key in new_keys}
+        container.clear()
+        container.update(reordered)
+        self.layer_order_changed.emit()
+        return True
+
+    def combine_layers(self, layer_ids, name=None):
+        unique_ids = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen:
+                continue
+            layer = self.get_layer(layer_id)
+            if layer is None:
+                return None, "Layer not found"
+            unique_ids.append(layer_id)
+            seen.add(layer_id)
+
+        if len(unique_ids) < 2:
+            return None, "Select at least two layers."
+
+        layers = [self.get_layer(layer_id) for layer_id in unique_ids]
+        first = layers[0]
+        if any(type(layer) is not type(first) for layer in layers[1:]):
+            return None, "Can only combine same-type layers."
+
+        requested_name = (name or "").strip()
+        if requested_name:
+            result_name = requested_name
+        else:
+            result_name = self._ensure_unique_layer_name("combined")
+
+        if isinstance(first, PointCloudLayer):
+            points = np.vstack([layer.points for layer in layers])
+            combined = PointCloudLayer(name=result_name, points=points, modified=True)
+            if any(layer.colors is not None for layer in layers):
+                color_chunks = []
+                for layer in layers:
+                    if layer.colors is not None:
+                        color_chunks.append(layer.colors)
+                    else:
+                        color_chunks.append(np.full((len(layer.points), 3), 0.5, dtype=np.float32))
+                combined.colors = np.vstack(color_chunks)
+            if all(layer.normals is not None for layer in layers):
+                combined.normals = np.vstack([layer.normals for layer in layers])
+            self.add_point_cloud(combined)
+            for layer_id in unique_ids:
+                self.remove_layer(layer_id)
+            return combined, ""
+
+        if isinstance(first, MeshLayer):
+            vertex_chunks = []
+            face_chunks = []
+            vertex_offset = 0
+            for layer in layers:
+                vertex_chunks.append(layer.vertices)
+                face_chunks.append(layer.faces + vertex_offset)
+                vertex_offset += len(layer.vertices)
+            combined = MeshLayer(
+                name=result_name,
+                vertices=np.vstack(vertex_chunks),
+                faces=np.vstack(face_chunks),
+                modified=True,
+            )
+            if all(layer.vertex_colors is not None for layer in layers):
+                combined.vertex_colors = np.vstack([layer.vertex_colors for layer in layers])
+            if all(layer.face_normals is not None for layer in layers):
+                combined.face_normals = np.vstack([layer.face_normals for layer in layers])
+            if all(layer.vertex_normals is not None for layer in layers):
+                combined.vertex_normals = np.vstack([layer.vertex_normals for layer in layers])
+            self.add_mesh(combined)
+            for layer_id in unique_ids:
+                self.remove_layer(layer_id)
+            return combined, ""
+
+        return None, "Can only combine same-type layers."
 
     def remove_layer(self, layer_id):
         removed = False
@@ -274,6 +410,32 @@ class LayerManager(QObject):
             layer = self.get_layer(layer_id)
             self.selection_changed.emit(layer)
 
+    def set_selected_layers(self, layer_ids, primary_layer_id=None, sublayer_name=None):
+        unique_ids = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen or self.get_layer(layer_id) is None:
+                continue
+            unique_ids.append(layer_id)
+            seen.add(layer_id)
+
+        if primary_layer_id not in seen:
+            primary_layer_id = unique_ids[0] if unique_ids else None
+
+        changed = (
+            self._selected_layer_ids != unique_ids or
+            self._selected_layer_id != primary_layer_id or
+            self._selected_sublayer_name != sublayer_name
+        )
+
+        self._selected_layer_ids = unique_ids
+        self._selected_layer_id = primary_layer_id
+        self._selected_sublayer_name = sublayer_name
+
+        if changed:
+            layer = self.get_layer(primary_layer_id)
+            self.selection_changed.emit(layer)
+
 
 
     # ── static helpers ───────────────────────────────────────────
@@ -314,6 +476,11 @@ class LayerManager(QObject):
         existing = {l.name for l in self.get_all_layers()}
         if name not in existing:
             return name
+        if name == "combined":
+            i = 1
+            while f"combined ({i})" in existing:
+                i += 1
+            return f"combined ({i})"
         i = 2
         while f"{name}_{i}" in existing:
             i += 1

@@ -1054,9 +1054,6 @@ if VTK_AVAILABLE:
 class CrossSectionPanel(QWidget):
     cross_section_created = Signal(object)
     points_transfer_requested = Signal(str, str, object)
-    transfer_undo_requested = Signal()
-    transfer_redo_requested = Signal()
-
     def __init__(self, viewport, layer_manager, parent=None):
         super().__init__(parent)
         self.viewport = viewport
@@ -1069,24 +1066,23 @@ class CrossSectionPanel(QWidget):
         self._transfer_in_progress = False
         self._undo_available = False
         self._redo_available = False
-        
-
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
-        outer_layout.addWidget(scroll, 0)
+        outer_layout.addWidget(scroll, 1)
 
         content = QWidget()
         scroll.setWidget(content)
 
         layout = QVBoxLayout(content)
         layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         if not VTK_AVAILABLE:
             lbl = QLabel("Cross Section requires VTK, which could not be imported.")
@@ -1152,20 +1148,7 @@ class CrossSectionPanel(QWidget):
         transfer_row.addWidget(self._to_layer_combo)
         layout.addLayout(transfer_row)
 
-        transfer_actions_row = QHBoxLayout()
-        self._undo_transfer_btn = QPushButton("↶")
-        self._undo_transfer_btn.setEnabled(False)
-        self._redo_transfer_btn = QPushButton("↷")
-        self._redo_transfer_btn.setEnabled(False)
-        self._undo_transfer_btn.setToolTip("Undo transfer")
-        self._redo_transfer_btn.setToolTip("Redo transfer")
-        transfer_actions_row.addWidget(self._undo_transfer_btn)
-        transfer_actions_row.addWidget(self._redo_transfer_btn)
-        layout.addLayout(transfer_actions_row)
-
-        layout.addStretch()
-
-        preview_container = QWidget(self)
+        preview_container = QWidget(content)
         preview_layout = QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(10, 10, 10, 10)
         preview_layout.setSpacing(6)
@@ -1176,14 +1159,13 @@ class CrossSectionPanel(QWidget):
         self._preview_widget = CrossSectionPreviewWidget(self)
         self._preview_widget.setMinimumHeight(280)
         preview_layout.addWidget(self._preview_widget, 1)
-        outer_layout.addWidget(preview_container, 1)
+        layout.addWidget(preview_container)
+        layout.addStretch()
         self._preview_widget.selection_changed.connect(self._on_preview_selection_changed)
         self._preview_widget.set_selection_mode_enabled(True)
 
         self._define_normal_btn.clicked.connect(self._on_define_normal)
         self._clear_normal_demo_btn.clicked.connect(self._on_clear_normal_demo)
-        self._undo_transfer_btn.clicked.connect(self.transfer_undo_requested.emit)
-        self._redo_transfer_btn.clicked.connect(self.transfer_redo_requested.emit)
         if hasattr(self.viewport, "cross_section_mode_changed"):
             self.viewport.cross_section_mode_changed.connect(self._on_pick_mode_changed)
 
@@ -1200,14 +1182,6 @@ class CrossSectionPanel(QWidget):
         self._backward_shortcut = QShortcut(QKeySequence("S"), self)
         self._backward_shortcut.setContext(Qt.ApplicationShortcut)
         self._backward_shortcut.activated.connect(lambda: self._move_plane(-1.0))
-
-        self._undo_transfer_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
-        self._undo_transfer_shortcut.setContext(Qt.ApplicationShortcut)
-        self._undo_transfer_shortcut.activated.connect(self._undo_transfer_btn.click)
-
-        self._redo_transfer_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
-        self._redo_transfer_shortcut.setContext(Qt.ApplicationShortcut)
-        self._redo_transfer_shortcut.activated.connect(self._redo_transfer_btn.click)
 
         self.layer_manager.layer_added.connect(self._refresh_transfer_layer_options)
         self.layer_manager.layer_removed.connect(self._refresh_transfer_layer_options)
@@ -1413,10 +1387,6 @@ class CrossSectionPanel(QWidget):
     def set_transfer_history_state(self, can_undo, can_redo):
         self._undo_available = bool(can_undo)
         self._redo_available = bool(can_redo)
-        if hasattr(self, "_undo_transfer_btn"):
-            self._undo_transfer_btn.setEnabled(self._undo_available)
-        if hasattr(self, "_redo_transfer_btn"):
-            self._redo_transfer_btn.setEnabled(self._redo_available)
         
     def _on_define_normal(self):
         target_layer = self._current_layer if isinstance(self._current_layer, PointCloudLayer) else self.layer_manager.first_point_cloud()

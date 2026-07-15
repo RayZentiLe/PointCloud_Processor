@@ -441,6 +441,9 @@ class PropertiesPanel(QWidget):
         layer = self.lm.get_selected_layer()
         if layer:
             layer.vis_color_scheme = self.cmb_scheme.currentText()
+            if layer.vis_color_scheme == "Solid":
+                layer.render_props["color_mode"] = "solid"
+                layer.render_props["solid_color"] = list(getattr(layer, "vis_solid_color", (0.2, 0.6, 1.0)))
             self._notify()
 
     def _on_pick_color(self):
@@ -452,6 +455,8 @@ class PropertiesPanel(QWidget):
         layer = self.lm.get_selected_layer()
         if layer:
             layer.vis_solid_color = (c.redF(), c.greenF(), c.blueF())
+            layer.render_props["color_mode"] = "solid"
+            layer.render_props["solid_color"] = [c.redF(), c.greenF(), c.blueF()]
             self._notify()
 
     def _on_mode(self):
@@ -589,6 +594,9 @@ class PropertiesPanel(QWidget):
 
     def _notify(self):
         self.visual_changed.emit()
+        layer = self.lm.get_selected_layer()
+        if layer is not None:
+            self.lm.layer_modified.emit(layer.id)
         if hasattr(self.lm, "visual_changed"):
             self.lm.visual_changed.emit()
 
