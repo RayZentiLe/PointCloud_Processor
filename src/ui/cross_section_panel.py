@@ -90,6 +90,8 @@ if VTK_AVAILABLE:
             self._lock_camera_orientation()
             if self._preview_widget is not None:
                 self._preview_widget.vtk_widget.GetRenderWindow().Render()
+                self._preview_widget._refresh_overlay_labels()
+                self._preview_widget.vtk_widget.GetRenderWindow().Render()
 
         def OnLeftButtonDown(self):
             if self._preview_widget is not None and self._preview_widget.handle_left_button_down():
@@ -276,9 +278,11 @@ if VTK_AVAILABLE:
             self._uv_bounds = None
             self._edge_axes_actor = None
             self._edge_axes_label_actors = []
+            self._edge_axes_label_specs = []
             self._selection_uv_rect = None
             self._drag_rectangle_actor = None
             self._selection_corner_label_actors = []
+            self._selection_corner_label_specs = []
             self._selection_rectangle_actor = None
             self._selection_overlay = None
 
@@ -304,6 +308,7 @@ if VTK_AVAILABLE:
             interactor.SetInteractorStyle(style)
             style.SetDefaultRenderer(self.renderer)
             interactor.AddObserver(vtk.vtkCommand.InteractionEvent, style.OnInteraction)
+            self.renderer.GetActiveCamera().AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_camera_modified)
 
             self._build_scene()
             self.vtk_widget.Initialize()
@@ -613,6 +618,7 @@ if VTK_AVAILABLE:
                 camera.SetViewUp(0.0, 0.0, 1.0)
                 camera.SetParallelProjection(True)
                 self.renderer.SetActiveCamera(camera)
+                camera.AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_camera_modified)
                 self.renderer.ResetCamera()
                 self._apply_parallel_scale_from_bounds()
             else:
@@ -752,12 +758,21 @@ if VTK_AVAILABLE:
             self._edge_axes_actor.GetProperty().SetLineWidth(1.5)
             self.renderer.AddActor(self._edge_axes_actor)
 
-            self._edge_axes_label_actors = [
-                self._make_axis_label_actor(np.array([bounds["u_max"], bounds["v_min"], 0.0], dtype=np.float32), "U", (0.9, 0.9, 0.9), offset=(-18, 8)),
-                self._make_axis_label_actor(np.array([bounds["u_min"], bounds["v_max"], 0.0], dtype=np.float32), "V", (0.9, 0.9, 0.9), offset=(8, -18)),
+            self._edge_axes_label_specs = [
+                {
+                    "point": np.array([bounds["u_max"], bounds["v_min"], 0.0], dtype=np.float32),
+                    "text": "U",
+                    "color": (0.9, 0.9, 0.9),
+                    "offset": (-18, 8),
+                },
+                {
+                    "point": np.array([bounds["u_min"], bounds["v_max"], 0.0], dtype=np.float32),
+                    "text": "V",
+                    "color": (0.9, 0.9, 0.9),
+                    "offset": (8, -18),
+                },
             ]
-            for actor in self._edge_axes_label_actors:
-                self.renderer.AddActor2D(actor)
+            self._refresh_overlay_labels()
 
         def _clear_edge_axes_overlay(self):
             if self._edge_axes_actor is not None:
@@ -766,11 +781,13 @@ if VTK_AVAILABLE:
             for actor in self._edge_axes_label_actors:
                 self.renderer.RemoveActor2D(actor)
             self._edge_axes_label_actors = []
+            self._edge_axes_label_specs = []
 
         def _clear_selection_corner_labels(self):
             for actor in self._selection_corner_label_actors:
                 self.renderer.RemoveActor2D(actor)
             self._selection_corner_label_actors = []
+            self._selection_corner_label_specs = []
 
         def _clear_selection_rectangle_actor(self):
             if self._selection_rectangle_actor is not None:
@@ -898,6 +915,38 @@ if VTK_AVAILABLE:
             text_prop.SetBold(True)
             return label
 
+        def _on_camera_modified(self, obj=None, event=None):
+            if self._vtk_closed:
+                return
+            self._refresh_overlay_labels()
+
+        def _refresh_overlay_labels(self):
+            for actor in self._edge_axes_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._edge_axes_label_actors = []
+            for spec in self._edge_axes_label_specs:
+                actor = self._make_axis_label_actor(
+                    spec["point"],
+                    spec["text"],
+                    spec["color"],
+                    offset=spec["offset"],
+                )
+                self._edge_axes_label_actors.append(actor)
+                self.renderer.AddActor2D(actor)
+
+            for actor in self._selection_corner_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._selection_corner_label_actors = []
+            for spec in self._selection_corner_label_specs:
+                actor = self._make_axis_label_actor(
+                    spec["point"],
+                    spec["text"],
+                    spec["color"],
+                    offset=spec["offset"],
+                )
+                self._selection_corner_label_actors.append(actor)
+                self.renderer.AddActor2D(actor)
+
         def _rebuild_scene(self, preserve_camera=False):
             saved_camera_state = self._capture_camera_state() if preserve_camera else None
             self.renderer.RemoveAllViewProps()
@@ -962,23 +1011,21 @@ if VTK_AVAILABLE:
 
             left_up = self._selection_uv_rect["left_up"]
             right_bottom = self._selection_uv_rect["right_bottom"]
-            corners = [
-                (
-                    np.array([left_up["u"], left_up["v"], 0.0], dtype=np.float32),
-                    f"LU ({left_up['u']:.3f}, {left_up['v']:.3f})",
-                    (8, -22),
-                ),
-                (
-                    np.array([right_bottom["u"], right_bottom["v"], 0.0], dtype=np.float32),
-                    f"RB ({right_bottom['u']:.3f}, {right_bottom['v']:.3f})",
-                    (-150, 8),
-                ),
+            self._selection_corner_label_specs = [
+                {
+                    "point": np.array([left_up["u"], left_up["v"], 0.0], dtype=np.float32),
+                    "text": f"LU ({left_up['u']:.3f}, {left_up['v']:.3f})",
+                    "color": (1.0, 1.0, 1.0),
+                    "offset": (8, -22),
+                },
+                {
+                    "point": np.array([right_bottom["u"], right_bottom["v"], 0.0], dtype=np.float32),
+                    "text": f"RB ({right_bottom['u']:.3f}, {right_bottom['v']:.3f})",
+                    "color": (1.0, 1.0, 1.0),
+                    "offset": (-150, 8),
+                },
             ]
-
-            for point, text, offset in corners:
-                actor = self._make_axis_label_actor(point, text, (1.0, 1.0, 1.0), offset=offset)
-                self._selection_corner_label_actors.append(actor)
-                self.renderer.AddActor2D(actor)
+            self._refresh_overlay_labels()
 
         def resizeEvent(self, event):
             super().resizeEvent(event)
@@ -988,6 +1035,7 @@ if VTK_AVAILABLE:
                 self._selection_overlay.update()
             if hasattr(self, "renderer"):
                 self._apply_parallel_scale_from_bounds()
+                self._refresh_overlay_labels()
                 self.vtk_widget.GetRenderWindow().Render()
 
         def showEvent(self, event):
@@ -1147,6 +1195,12 @@ class CrossSectionPanel(QWidget):
         self._to_layer_combo = QComboBox(self)
         transfer_row.addWidget(self._to_layer_combo)
         layout.addLayout(transfer_row)
+
+        self._transfer_note_label = QLabel(
+            "Note: you can only transfer points within different meshes in the same layer."
+        )
+        self._transfer_note_label.setWordWrap(True)
+        layout.addWidget(self._transfer_note_label)
 
         preview_container = QWidget(content)
         preview_layout = QVBoxLayout(preview_container)

@@ -7,9 +7,9 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog,
     QMessageBox, QProgressBar, QInputDialog,
+    QDialog,
 )
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QDialog
 
 from core.layer_manager import LayerManager
 from core.layer import PointCloudLayer, MeshLayer
