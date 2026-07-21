@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 import open3d as o3d
-from core.layer import MeshLayer
+from core.layer import MeshLayer, MaskGroup
 
 
 def run_poisson(points, colors, depth, scale,
@@ -78,6 +78,38 @@ def run_poisson(points, colors, depth, scale,
     mesh.remove_duplicated_triangles()
     mesh.remove_duplicated_vertices()
     mesh.remove_non_manifold_edges()
+    progress_cb(82)
+
+    cluster_ids, counts, _ = mesh.cluster_connected_triangles()
+    cluster_ids = np.asarray(cluster_ids)
+    counts = np.asarray(counts)
+
+    if len(counts) == 0:
+        raise ValueError("No connected components found after Poisson reconstruction")
+
+    largest_id = int(counts.argmax())
+    largest_mask = cluster_ids == largest_id
+
+    mg = MaskGroup(
+        filter_name="mesh_filter",
+        mask=largest_mask,
+        positive_name="largest",
+        negative_name="small_components",
+        positive_visible=True,
+        negative_visible=True,
+        positive_color=None,
+        negative_color=None,
+    )
+    mg.positive_color_mode = "solid"
+    mg.negative_color_mode = "solid"
+    mg.positive_solid_color = (0.2, 0.8, 0.2)
+    mg.negative_solid_color = (1.0, 0.5, 0.0)
+
+    n_components = len(counts)
+    largest_count = int(counts[largest_id])
+    small_count = int(np.sum(~largest_mask))
+    print(f"[Poisson] Connected components: {n_components}, "
+          f"largest={largest_count}, small={small_count}", file=sys.stderr)
     progress_cb(90)
 
     mesh.compute_vertex_normals()
@@ -94,4 +126,4 @@ def run_poisson(points, colors, depth, scale,
     print(f"[Poisson] Done: {layer.face_count} faces, "
           f"{layer.vertex_count} vertices", file=sys.stderr)
     progress_cb(100)
-    return layer
+    return layer, mg, n_components, largest_count, small_count

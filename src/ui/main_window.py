@@ -7,7 +7,7 @@ import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog,
     QMessageBox, QProgressBar, QInputDialog,
-    QDialog,
+    QDialog, QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer
 
@@ -42,10 +42,14 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menus()
         self._connect()
+        QTimer.singleShot(0, self._load_startup_test_files)
 
     # ── UI setup ─────────────────────────────────────────────────
 
     def _build_ui(self):
+        self.setDockNestingEnabled(False)
+        self.setDockOptions(QMainWindow.AnimatedDocks)
+
         # Try to import the rich VTK-based viewport. If VTK is unavailable
         # (import errors), fall back to a lightweight placeholder so the
         # rest of the UI (docks, panels) can still be used.
@@ -85,15 +89,19 @@ class MainWindow(QMainWindow):
         # left dock – layer tree
         self.layer_panel = LayerPanel(self.lm, self)
         self.layers_dock = QDockWidget("Layers", self)
+        self.layers_dock.setObjectName("LayersDock")
         self.layers_dock.setWidget(self.layer_panel)
         self.layers_dock.setMinimumWidth(290)
+        self.layers_dock.setFeatures(QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.layers_dock)
 
         # right dock – properties
         self.props_panel = PropertiesPanel(self.lm, self)
         self.properties_dock = QDockWidget("Properties", self)
+        self.properties_dock.setObjectName("PropertiesDock")
         self.properties_dock.setWidget(self.props_panel)
-        self.properties_dock.setMinimumWidth(260)
+        self.properties_dock.setMinimumWidth(350)
+        self.properties_dock.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.properties_dock.setFeatures(
             QDockWidget.DockWidgetClosable
         )
@@ -104,25 +112,36 @@ class MainWindow(QMainWindow):
         self.cross_section_panel = CrossSectionPanel(self.viewport, self.lm, self)
         self.cross_section_panel.cross_section_created.connect(self._on_cross_section_created)
         self.cross_section_panel.points_transfer_requested.connect(self._on_cross_section_points_transfer_requested)
-        self.cross_section_dock = QDockWidget("Cross Section", self)
+        self.cross_section_dock = _CrossSectionDockWidget("Cross Section", self)
+        self.cross_section_dock.setObjectName("CrossSectionDock")
         self.cross_section_dock.setWidget(self.cross_section_panel)
-        self.cross_section_dock.setMinimumWidth(320)
+        self.cross_section_dock.setMinimumWidth(350)
+        self.cross_section_dock.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.cross_section_dock.setFeatures(
             QDockWidget.DockWidgetClosable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
         )
+        self.cross_section_dock.setFloating(False)
         self.addDockWidget(Qt.RightDockWidgetArea, self.cross_section_dock)
         self.splitDockWidget(self.properties_dock, self.cross_section_dock, Qt.Vertical)
-        self.cross_section_dock.setVisible(False)
+        self.cross_section_dock.setVisible(True)
 
         QTimer.singleShot(0, self._apply_initial_dock_layout)
+        QTimer.singleShot(0, self._capture_initial_dock_state)
 
         self.toolbar = Toolbar(self.lm, self)
+        self.toolbar.setObjectName("MainToolbar")
         self.addToolBar(Qt.TopToolBarArea, self.toolbar)
+        self.toolbar.setAllowedAreas(Qt.TopToolBarArea)
+        self.toolbar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         self.log = LogPanel(self)
         self.log_dock = QDockWidget("Log", self)
+        self.log_dock.setObjectName("LogDock")
         self.log_dock.setWidget(self.log)
         self.log_dock.setMaximumHeight(200)
+        self.log_dock.setFeatures(QDockWidget.DockWidgetClosable)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
 
         # Pass dock widgets to toolbar for Windows menu (include cross section)
@@ -134,12 +153,70 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.pbar)
 
     def _apply_initial_dock_layout(self):
-        if hasattr(self, "properties_dock") and hasattr(self, "cross_section_dock"):
+        if hasattr(self, "cross_section_dock") and self.cross_section_dock.isFloating():
+            if hasattr(self, "properties_dock") and self.properties_dock.isVisible():
+                self.properties_dock.setMinimumWidth(350)
+                self.properties_dock.resize(max(350, self.width() // 4), self.properties_dock.height())
+            return
+        if hasattr(self, "properties_dock") and hasattr(self, "cross_section_dock") and self.properties_dock.isVisible() and self.cross_section_dock.isVisible():
             self.resizeDocks(
                 [self.properties_dock, self.cross_section_dock],
                 [380, 320],
                 Qt.Vertical,
             )
+        elif hasattr(self, "cross_section_dock") and self.cross_section_dock.isVisible():
+            self.resizeDocks(
+                [self.cross_section_dock],
+                [max(320, self.height() - self.log_dock.height())],
+                Qt.Vertical,
+            )
+        if hasattr(self, "layers_dock") and hasattr(self, "properties_dock"):
+            self.properties_dock.setMinimumWidth(350)
+            self.resizeDocks(
+                [self.layers_dock, self.properties_dock],
+                [290, 350],
+                Qt.Horizontal,
+            )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_initial_dock_layout()
+
+    def _load_startup_test_files(self):
+        loaded_count = 0
+        missing_files = []
+        for path in getattr(self, "_startup_test_files", []):
+            if not os.path.isfile(path):
+                missing_files.append(path)
+                continue
+            if self._open_path(path, show_error_dialog=False):
+                loaded_count += 1
+
+        if loaded_count:
+            self.log.log(f"TESTING startup load: opened {loaded_count} point cloud file(s).")
+        if missing_files:
+            self.log.log("TESTING startup load missing files: " + ", ".join(missing_files))
+
+    def _capture_initial_dock_state(self):
+        try:
+            self._initial_dock_state = self.saveState()
+        except Exception:
+            self._initial_dock_state = None
+
+    def _restore_cross_section_dock_position(self):
+        if not hasattr(self, "cross_section_dock"):
+            return
+        self.cross_section_dock.hide()
+        self.cross_section_dock.setParent(self)
+        self.cross_section_dock.setFloating(False)
+        if self._initial_dock_state is not None:
+            self.restoreState(self._initial_dock_state)
+        else:
+            self.removeDockWidget(self.cross_section_dock)
+            self.addDockWidget(Qt.RightDockWidgetArea, self.cross_section_dock)
+            if hasattr(self, "properties_dock") and self.properties_dock.isVisible():
+                self.splitDockWidget(self.properties_dock, self.cross_section_dock, Qt.Vertical)
+        self._apply_initial_dock_layout()
 
     def _build_menus(self):
         fm = self.menuBar().addMenu("&File")
@@ -153,6 +230,7 @@ class MainWindow(QMainWindow):
         tb.open_requested.connect(self._open)
         tb.undo_requested.connect(self._on_global_undo_requested)
         tb.redo_requested.connect(self._on_global_redo_requested)
+        tb.auto_denoise_requested.connect(self._run_auto_denoise)
         tb.pca_requested.connect(self._run_pca)
         tb.poisson_requested.connect(self._run_poisson)
         tb.mesh_filter_requested.connect(self._run_mf)
@@ -168,12 +246,14 @@ class MainWindow(QMainWindow):
         lp.delete_mask_requested.connect(self._delete_mask)
         lp.combine_layers_requested.connect(self._combine_selected_layers)
         lp.assign_colors_requested.connect(self._assign_colors_to_layers)
+        lp.copy_layers_requested.connect(self._copy_layers)
         lp.camera_to_layer_requested.connect(self.viewport.focus_camera_on_layer)
         
         # Connect dock widget visibility changes to toolbar menu
         self.layers_dock.visibilityChanged.connect(self._on_layers_visibility_changed)
         self.properties_dock.visibilityChanged.connect(self._on_properties_visibility_changed)
         self.cross_section_dock.visibilityChanged.connect(self._on_cross_section_visibility_changed)
+        self.cross_section_dock.topLevelChanged.connect(self._on_cross_section_top_level_changed)
         self.log_dock.visibilityChanged.connect(self._on_log_visibility_changed)
         self.lm.selection_changed.connect(self.on_layer_selected)
         self.lm.visibility_changed.connect(self._on_layer_visibility_changed)
@@ -430,6 +510,18 @@ class MainWindow(QMainWindow):
             self.lm.layer_modified.emit(layer.id)
             self.log.log(f"Assigned colour to: {layer.name}")
 
+    def _copy_layers(self, layer_ids):
+        copied_ids = self.lm.copy_layers(layer_ids)
+        if not copied_ids:
+            return
+        copied_layers = [self.lm.get_layer(layer_id) for layer_id in copied_ids]
+        copied_layers = [layer for layer in copied_layers if layer is not None]
+        if not copied_layers:
+            return
+        self.lm.set_selected_layers(copied_ids, copied_ids[0], None)
+        for layer in copied_layers:
+            self.log.log(f"Copied layer: {layer.name}")
+
     # ── PCA ──────────────────────────────────────────────────────
 
     def _run_pca(self):
@@ -495,6 +587,155 @@ class MainWindow(QMainWindow):
             f"PCA Filter complete: {mg.positive_count:,} kept, "
             f"{mg.negative_count:,} rejected")
 
+    def _run_auto_denoise(self):
+        try:
+            layer = self._get_or_pick_pc()
+            if layer is None:
+                QMessageBox.information(
+                    self, "Auto Denoise",
+                    "Select a point cloud first.")
+                return
+
+            from ui.dialogs.pca_dialog import PCADialog
+            pca_dlg = PCADialog(self)
+            pca_dlg.setWindowTitle("Auto Denoise - PCA Settings")
+            if pca_dlg.exec() != QDialog.Accepted:
+                self.log.log("Auto Denoise: cancelled at PCA step.")
+                return
+            pca_params = pca_dlg.get_params()
+
+            from ui.dialogs.poisson_dialog import PoissonDialog
+            poisson_dlg = PoissonDialog(self)
+            poisson_dlg.setWindowTitle("Auto Denoise - Poisson Settings")
+            if poisson_dlg.exec() != QDialog.Accepted:
+                self.log.log("Auto Denoise: cancelled at Poisson step.")
+                return
+            poisson_params = poisson_dlg.get_params()
+
+            from PySide6.QtWidgets import QInputDialog
+            threshold, ok = QInputDialog.getDouble(
+                self,
+                "Auto Denoise - Noise Removal",
+                "Distance Threshold:",
+                1.0,
+                0.0001,
+                1000.0,
+                4,
+            )
+            if not ok:
+                self.log.log("Auto Denoise: cancelled at Noise Removal step.")
+                return
+
+            self.log.log(f"Auto Denoise: starting on '{layer.name}'...")
+            self._start_auto_denoise_pipeline(layer, pca_params, poisson_params, threshold)
+
+        except Exception as e:
+            msg = f"Auto denoise setup error: {e}\n{traceback.format_exc()}"
+            self.log.log(f"ERROR: {msg}")
+            print(msg, file=sys.stderr)
+
+    def _start_auto_denoise_pipeline(self, layer, pca_params, poisson_params, noise_threshold):
+        sname = self.lm.selected_sublayer_name
+        if sname:
+            mask = self.lm.get_sublayer_mask(layer, sname)
+            indices = np.where(mask)[0]
+            pts = layer.points[indices]
+            self.log.log(f"Auto Denoise: PCA on sublayer '{sname}' ({len(pts):,} pts)")
+        else:
+            pts = layer.points
+            indices = None
+            self.log.log(f"Auto Denoise: PCA on entire layer ({len(pts):,} pts)")
+
+        from tools.pca_filter import run_pca_filter
+        self._launch(
+            run_pca_filter,
+            points=pts,
+            indices=indices,
+            total_count=layer.point_count,
+            radius=pca_params["radius"],
+            threshold=pca_params["threshold"],
+            k_neighbors=pca_params["k_neighbors"],
+            chunk_size=pca_params["chunk_size"],
+            on_done=lambda r, _layer=layer, _pp=poisson_params, _nt=noise_threshold:
+                self._auto_denoise_after_pca(_layer, r, _pp, _nt),
+            loading_title="Auto Denoise",
+            loading_message=f"Running PCA filter on {layer.name}...",
+        )
+
+    def _auto_denoise_after_pca(self, layer, mg, poisson_params, noise_threshold):
+        if mg is None:
+            self.log.log("Auto Denoise: cancelled during PCA step.")
+            return
+
+        self.lm.add_mask_group(layer.id, mg)
+        self.log.log(
+            f"Auto Denoise: PCA complete ({mg.positive_count:,} kept, {mg.negative_count:,} rejected)")
+
+        kept_mask = self.lm.get_sublayer_mask(layer, "pca_kept")
+        pts = layer.points[kept_mask]
+        clr = layer.colors[kept_mask] if layer.colors is not None else None
+
+        if len(pts) == 0:
+            QMessageBox.warning(self, "Auto Denoise", "PCA kept no points.")
+            return
+
+        mesh_name = f"{layer.name}_pca_kept_poisson"
+        from tools.poisson import run_poisson
+        self._launch(
+            run_poisson,
+            points=pts,
+            colors=clr,
+            depth=poisson_params["depth"],
+            scale=poisson_params["scale"],
+            density_quantile=poisson_params["density_quantile"],
+            linear_fit=poisson_params["linear_fit"],
+            on_done=lambda r, _layer=layer, _name=mesh_name, _nt=noise_threshold:
+                self._auto_denoise_after_poisson(_layer, r, _name, _nt),
+            loading_title="Auto Denoise",
+            loading_message=f"Running Poisson on {layer.name} pca_kept...",
+        )
+
+    def _auto_denoise_after_poisson(self, source_layer, result, mesh_name, noise_threshold):
+        ml, mg, n_comp, big, small = result
+        ml.name = mesh_name
+        self.lm.add_mesh(ml)
+        self.lm.add_mask_group(ml.id, mg)
+        self.log.log(
+            f"Auto Denoise: Poisson complete for {ml.name} ({ml.face_count:,} faces). "
+            f"Mesh Filter: {n_comp} components, largest {big:,}, small {small:,} faces")
+
+        largest_faces = self.lm.get_sublayer_mask(ml, "largest")
+        if not np.any(largest_faces):
+            QMessageBox.warning(self, "Auto Denoise", "Largest mesh component is empty.")
+            return
+
+        used_v = np.unique(ml.faces[largest_faces].ravel())
+        mesh_verts = ml.vertices[used_v]
+
+        from tools.noise_removal import run_noise_removal
+        self._launch(
+            run_noise_removal,
+            points=source_layer.points,
+            indices=None,
+            total_count=source_layer.point_count,
+            mesh_vertices=mesh_verts,
+            threshold=noise_threshold,
+            on_done=lambda r, _lid=source_layer.id, _mesh_id=ml.id:
+                self._auto_denoise_after_noise(_lid, _mesh_id, r),
+            loading_title="Auto Denoise",
+            loading_message=f"Removing noise from {source_layer.name} using largest mesh...",
+        )
+
+    def _auto_denoise_after_noise(self, source_layer_id, mesh_layer_id, mg):
+        if mg is None:
+            self.log.log("Auto Denoise: cancelled during Noise Removal step.")
+            return
+        self.lm.add_mask_group(source_layer_id, mg)
+        self.lm.set_selection(mesh_layer_id)
+        self.log.log(
+            f"Auto Denoise complete: {mg.positive_count:,} clean, {mg.negative_count:,} noise")
+        self.viewport.fit_all()
+
     # ── Poisson ──────────────────────────────────────────────────
 
     def _run_poisson(self):
@@ -554,13 +795,16 @@ class MainWindow(QMainWindow):
             self.log.log(f"ERROR: {msg}")
             print(msg, file=sys.stderr)
 
-    def _poisson_done(self, ml, name):
+    def _poisson_done(self, result, name):
+        ml, mg, n_comp, big, small = result
         ml.name = name
         self.lm.add_mesh(ml)
+        self.lm.add_mask_group(ml.id, mg)
         self.lm.set_selection(ml.id)
         self.log.log(
             f"Poisson complete: {ml.name} ({ml.face_count:,} faces, "
-            f"{ml.vertex_count:,} verts)")
+            f"{ml.vertex_count:,} verts). "
+            f"Mesh Filter: {n_comp} components, largest {big:,}, small {small:,} faces")
         self.viewport.fit_all()
 
     # ── Mesh filter ──────────────────────────────────────────────
@@ -631,11 +875,13 @@ class MainWindow(QMainWindow):
                     "Run Poisson reconstruction first.")
                 return
 
+            preferred_mesh = self._find_preferred_noise_mesh(layer, meshes)
+
             self.log.log(
                 f"Noise Removal: opening dialog for '{layer.name}'...")
 
             from ui.dialogs.noise_dialog import NoiseDialog
-            dlg = NoiseDialog(meshes, self)
+            dlg = NoiseDialog(meshes, preferred_mesh_id=(preferred_mesh.id if preferred_mesh else None), parent=self)
             if dlg.exec() != QDialog.Accepted:
                 self.log.log("Noise Removal: cancelled.")
                 return
@@ -677,6 +923,25 @@ class MainWindow(QMainWindow):
             msg = f"Noise removal setup error: {e}\n{traceback.format_exc()}"
             self.log.log(f"ERROR: {msg}")
             print(msg, file=sys.stderr)
+
+    def _find_preferred_noise_mesh(self, layer, meshes):
+        preferred_names = [
+            f"{layer.name}_pca_kept_poisson",
+            f"{layer.name}_poisson",
+        ]
+
+        for name in preferred_names:
+            for mesh in meshes:
+                if mesh.name == name:
+                    return mesh
+
+        layer_source = getattr(layer, "source_path", None)
+        if layer_source:
+            for mesh in meshes:
+                if getattr(mesh, "source_path", None) == layer_source:
+                    return mesh
+
+        return meshes[0] if meshes else None
 
     def _noise_done(self, lid, mg):
         self.lm.add_mask_group(lid, mg)
@@ -745,9 +1010,6 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             QMessageBox.warning(self, "Busy", "A task is already running.")
             return
-
-        if hasattr(self, "cross_section_dock") and self.cross_section_dock is not None:
-            self.cross_section_dock.setVisible(False)
         
         self.pbar.setVisible(True)
         self.pbar.setValue(0)
@@ -818,8 +1080,18 @@ class MainWindow(QMainWindow):
                 "Click on a point cloud in the Layers panel, then open the Cross Section panel.")
             return
 
+        self._restore_cross_section_dock_position()
+        self.cross_section_dock.setFloating(False)
         self.cross_section_dock.setVisible(True)
         self.cross_section_dock.raise_()
+
+    def _on_cross_section_top_level_changed(self, _floating):
+        if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
+            if hasattr(self.cross_section_panel, "refresh_preview"):
+                self.cross_section_panel.refresh_preview()
+            preview_widget = getattr(self.cross_section_panel, "_preview_widget", None)
+            if preview_widget is not None and hasattr(preview_widget, "reinitialize_vtk"):
+                preview_widget.reinitialize_vtk()
 
     def _on_cross_section_created(self, new_layer):
         from core.layer import MaskGroup
@@ -1137,6 +1409,8 @@ class MainWindow(QMainWindow):
         self.toolbar.properties_action.blockSignals(True)
         self.toolbar.properties_action.setChecked(visible)
         self.toolbar.properties_action.blockSignals(False)
+        if hasattr(self, "cross_section_dock") and self.cross_section_dock.isVisible():
+            self._restore_cross_section_dock_position()
 
     def _on_log_visibility_changed(self, visible):
         """Update Windows menu when Log panel visibility changes."""
@@ -1144,16 +1418,39 @@ class MainWindow(QMainWindow):
         self.toolbar.log_action.setChecked(visible)
         self.toolbar.log_action.blockSignals(False)
         self.props_panel.visual_changed.connect(self.viewport.rebuild_all)
-    
+
     def set_app_font_size(self, size):
         font = self.font()
         font.setPointSize(size)
         self.setFont(font)
-        
+
     def on_layer_selected(self, layer):
         print("Layer selected:", layer)  # debug
         self.cross_section_panel.set_current_layer(layer)
 
     def _on_layer_visibility_changed(self, layer_id):
+        self.cross_section_panel.refresh_preview()
+
+
+class _CrossSectionDockWidget(QDockWidget):
+    def closeEvent(self, event):
+        main_window = self.parent()
+        restore_handler = getattr(main_window, "_restore_cross_section_dock_position", None)
+        if callable(restore_handler):
+            try:
+                event.ignore()
+                restore_handler()
+                self.hide()
+                return
+            except Exception:
+                pass
+        try:
+            widget = self.widget()
+            shutdown_preview = getattr(widget, "shutdown_vtk", None)
+            if callable(shutdown_preview):
+                shutdown_preview()
+        except Exception:
+            pass
+        super().closeEvent(event)
         if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
             self.cross_section_panel.refresh_preview()

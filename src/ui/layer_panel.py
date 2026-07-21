@@ -23,6 +23,7 @@ class LayerPanel(QWidget):
     delete_mask_requested = Signal(str, str)      # layer_id, mg_id
     combine_layers_requested = Signal(list)
     assign_colors_requested = Signal(list)
+    copy_layers_requested = Signal(list)
 
     def __init__(self, layer_manager: LayerManager, parent=None):
         super().__init__(parent)
@@ -107,6 +108,21 @@ class LayerPanel(QWidget):
         # original / height_gradient → neutral grey
         return (0.6, 0.6, 0.6)
 
+    @staticmethod
+    def _icon_color_for_sublayer(mask_group, is_positive, base_clr):
+        color_mode = (mask_group.positive_color_mode if is_positive
+                      else mask_group.negative_color_mode)
+        solid_color = (mask_group.positive_solid_color if is_positive
+                       else mask_group.negative_solid_color)
+        legacy_color = (mask_group.positive_color if is_positive
+                        else mask_group.negative_color)
+
+        if color_mode == "solid":
+            return tuple(solid_color)
+        if legacy_color is not None:
+            return tuple(legacy_color)
+        return base_clr
+
     # ── rebuild ──────────────────────────────────────────────────
 
     def _rebuild(self):
@@ -189,7 +205,7 @@ class LayerPanel(QWidget):
             p.setData(0, _R_POS, True)
             p.setData(0, _R_TYPE, "sub")
             p.setCheckState(0, Qt.Checked if mg.positive_visible else Qt.Unchecked)
-            clr = mg.positive_color or base_clr
+            clr = self._icon_color_for_sublayer(mg, True, base_clr)
             p.setIcon(0, self._color_icon(clr))
 
             # negative
@@ -201,7 +217,7 @@ class LayerPanel(QWidget):
             n.setData(0, _R_POS, False)
             n.setData(0, _R_TYPE, "sub")
             n.setCheckState(0, Qt.Checked if mg.negative_visible else Qt.Unchecked)
-            clr = mg.negative_color or base_clr
+            clr = self._icon_color_for_sublayer(mg, False, base_clr)
             n.setIcon(0, self._color_icon(clr))
 
         return item
@@ -269,6 +285,8 @@ class LayerPanel(QWidget):
                            lambda: self._select_item(item))
             menu.addAction("Rename",
                            lambda: self._rename_layer(lid))
+            menu.addAction("Copy Layer(s)",
+                           lambda ids=selected_ids: self.copy_layers_requested.emit(ids))
             menu.addAction("Assign Colour",
                            lambda ids=selected_ids: self.assign_colors_requested.emit(ids))
             if len(selected_ids) >= 2:

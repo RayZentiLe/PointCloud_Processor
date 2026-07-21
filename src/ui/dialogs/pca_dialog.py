@@ -4,6 +4,16 @@ from PySide6.QtWidgets import (
 )
 
 
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class PCADialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -22,26 +32,26 @@ class PCADialog(QDialog):
         grp = QGroupBox("Parameters")
         form = QFormLayout(grp)
 
-        self._radius = QDoubleSpinBox()
+        self._radius = _NoWheelDoubleSpinBox()
         self._radius.setRange(0.001, 1000.0)
         self._radius.setDecimals(4)
         self._radius.setValue(0.50)
         self._radius.setSingleStep(0.01)
         form.addRow("Search Radius:", self._radius)
 
-        self._threshold = QDoubleSpinBox()
+        self._threshold = _NoWheelDoubleSpinBox()
         self._threshold.setRange(0.0, 1.0)
         self._threshold.setDecimals(3)
         self._threshold.setValue(0.3)
         self._threshold.setSingleStep(0.05)
         form.addRow("Planarity Threshold:", self._threshold)
 
-        self._k = QSpinBox()
+        self._k = _NoWheelSpinBox()
         self._k.setRange(3, 200)
         self._k.setValue(10)
         form.addRow("Min Neighbors (k):", self._k)
 
-        self._chunk = QSpinBox()
+        self._chunk = _NoWheelSpinBox()
         self._chunk.setRange(100, 1000000)
         self._chunk.setValue(50000)
         self._chunk.setSingleStep(10000)

@@ -4,6 +4,16 @@ from PySide6.QtWidgets import (
 )
 
 
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class PoissonDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -22,19 +32,19 @@ class PoissonDialog(QDialog):
         grp = QGroupBox("Parameters")
         form = QFormLayout(grp)
 
-        self._depth = QSpinBox()
+        self._depth = _NoWheelSpinBox()
         self._depth.setRange(1, 14)
         self._depth.setValue(9)
         form.addRow("Octree Depth:", self._depth)
 
-        self._scale = QDoubleSpinBox()
+        self._scale = _NoWheelDoubleSpinBox()
         self._scale.setRange(1.0, 5.0)
         self._scale.setDecimals(2)
         self._scale.setValue(1.1)
         self._scale.setSingleStep(0.1)
         form.addRow("Scale:", self._scale)
 
-        self._dq = QDoubleSpinBox()
+        self._dq = _NoWheelDoubleSpinBox()
         self._dq.setRange(0.0, 0.99)
         self._dq.setDecimals(3)
         self._dq.setValue(0.05)

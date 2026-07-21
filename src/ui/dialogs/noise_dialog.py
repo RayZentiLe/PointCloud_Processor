@@ -4,13 +4,24 @@ from PySide6.QtWidgets import (
 )
 
 
+class _NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class NoiseDialog(QDialog):
-    def __init__(self, meshes, parent=None):
+    def __init__(self, meshes, preferred_mesh_id=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Noise Removal Settings")
         self.setMinimumWidth(380)
         self._meshes = meshes
         self._mesh_by_id = {m.id: m for m in meshes}
+        self._preferred_mesh_id = preferred_mesh_id
 
         layout = QVBoxLayout(self)
 
@@ -23,16 +34,16 @@ class NoiseDialog(QDialog):
         grp = QGroupBox("Parameters")
         form = QFormLayout(grp)
 
-        self._mesh_combo = QComboBox()
+        self._mesh_combo = _NoWheelComboBox()
         for m in meshes:
             self._mesh_combo.addItem(m.name, m.id)
         self._mesh_combo.currentIndexChanged.connect(self._on_mesh_selected)
         form.addRow("Reference Mesh:", self._mesh_combo)
 
-        self._sublayer_combo = QComboBox()
+        self._sublayer_combo = _NoWheelComboBox()
         form.addRow("Mesh Sublayer:", self._sublayer_combo)
 
-        self._threshold = QDoubleSpinBox()
+        self._threshold = _NoWheelDoubleSpinBox()
         self._threshold.setRange(0.0001, 1000.0)
         self._threshold.setDecimals(4)
         self._threshold.setValue(1.0)
@@ -46,6 +57,11 @@ class NoiseDialog(QDialog):
         bbox.accepted.connect(self.accept)
         bbox.rejected.connect(self.reject)
         layout.addWidget(bbox)
+
+        if self._preferred_mesh_id is not None:
+            mesh_index = self._mesh_combo.findData(self._preferred_mesh_id)
+            if mesh_index >= 0:
+                self._mesh_combo.setCurrentIndex(mesh_index)
 
         # Initialize sublayers for the first mesh
         self._on_mesh_selected()
@@ -74,6 +90,10 @@ class NoiseDialog(QDialog):
         for mg in mesh.mask_groups:
             self._sublayer_combo.addItem(f"{mg.positive_name} ({mg.positive_count:,})", mg.positive_name)
             self._sublayer_combo.addItem(f"{mg.negative_name} ({mg.negative_count:,})", mg.negative_name)
+
+        largest_index = self._sublayer_combo.findData("largest")
+        if largest_index >= 0:
+            self._sublayer_combo.setCurrentIndex(largest_index)
         
         self._sublayer_combo.blockSignals(False)
 

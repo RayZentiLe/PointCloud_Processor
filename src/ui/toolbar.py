@@ -64,6 +64,7 @@ class Toolbar(QToolBar):
     open_requested = Signal()
     undo_requested = Signal()
     redo_requested = Signal()
+    auto_denoise_requested = Signal()
     pca_requested = Signal()
     poisson_requested = Signal()
     mesh_filter_requested = Signal()
@@ -76,14 +77,17 @@ class Toolbar(QToolBar):
         super().__init__("Main Toolbar", parent)
         self.layer_manager = layer_manager
         self.dock_widgets = {}  # Store references to dock widgets
+        self.setMovable(False)
+        self.setFloatable(False)
+        self.setToolButtonStyle(Qt.ToolButtonTextOnly)
 
         self.addAction("📂 Open", self.open_requested.emit)
         self.addAction("↶ Undo", self.undo_requested.emit)
         self.addAction("↷ Redo", self.redo_requested.emit)
         self.addSeparator()
+        self.addAction("Auto Denoise", self.auto_denoise_requested.emit)
         self.addAction("PCA Filter", self.pca_requested.emit)
         self.addAction("Poisson", self.poisson_requested.emit)
-        self.addAction("Mesh Filter", self.mesh_filter_requested.emit)
         self.addAction("Noise Removal", self.noise_removal_requested.emit)
         self.addAction("Cross Section", self.cross_section_requested.emit)
         self.addSeparator()
@@ -129,6 +133,7 @@ class Toolbar(QToolBar):
         menu_button.setText("Windows")
         menu_button.setMenu(menu)
         menu_button.setPopupMode(QToolButton.InstantPopup)
+        menu_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addWidget(menu_button)
 
     def _create_help_menu(self):
@@ -152,6 +157,7 @@ class Toolbar(QToolBar):
         menu_button.setText("Help")
         menu_button.setMenu(menu)
         menu_button.setPopupMode(QToolButton.InstantPopup)
+        menu_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.addWidget(menu_button)
 
     def set_dock_widgets(self, layers_dock, properties_dock, log_dock, cross_section_dock=None):

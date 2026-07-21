@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
     QSlider, QPushButton, QColorDialog, QGroupBox, QFormLayout,
     QRadioButton, QButtonGroup, QDoubleSpinBox, QFrame, QScrollArea,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -19,6 +20,16 @@ _DIR_ITEMS = ["X", "-X", "Y", "-Y", "Z", "-Z"]
 _DIR_AXIS  = [ 0,    0,   1,    1,   2,    2 ]   # coord column
 _DIR_FLIP  = [False, True, False, True, False, True]
 _DIR_DEFAULT_COMBO = 4    # "Z"
+
+
+class _NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 def _combo_index(axis: int, flip: bool) -> int:
@@ -60,8 +71,10 @@ class PropertiesPanel(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
         root.addWidget(scroll)
+        self._scroll_area = scroll
 
         content = QWidget()
+        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         scroll.setWidget(content)
 
         root = QVBoxLayout(content)
@@ -117,7 +130,7 @@ class PropertiesPanel(QWidget):
         # --- colour scheme combo ------------------------------
         cs_row = QHBoxLayout()
         cs_row.addWidget(QLabel("Color:"))
-        self.cmb_scheme = QComboBox()
+        self.cmb_scheme = _NoWheelComboBox()
         self.cmb_scheme.addItems(["Original", "Solid", "Gradient"])
         cs_row.addWidget(self.cmb_scheme, 1)
         vl.addLayout(cs_row)
@@ -142,7 +155,7 @@ class PropertiesPanel(QWidget):
 
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("Axis:"))
-        self.cmb_dir = QComboBox()
+        self.cmb_dir = _NoWheelComboBox()
         self.cmb_dir.addItems(_DIR_ITEMS)
         self.cmb_dir.setCurrentIndex(_DIR_DEFAULT_COMBO)
         dir_row.addWidget(self.cmb_dir, 1)
@@ -163,14 +176,14 @@ class PropertiesPanel(QWidget):
 
         mm = QFormLayout()
         mm.setContentsMargins(0, 0, 0, 0)
-        self.sp_min = QDoubleSpinBox()
+        self.sp_min = _NoWheelDoubleSpinBox()
         self.sp_min.setRange(-1e7, 1e7)
         self.sp_min.setDecimals(2)
         self.sp_min.setSingleStep(0.1)
         self.sp_min.setEnabled(False)
         mm.addRow("Min:", self.sp_min)
 
-        self.sp_max = QDoubleSpinBox()
+        self.sp_max = _NoWheelDoubleSpinBox()
         self.sp_max.setRange(-1e7, 1e7)
         self.sp_max.setDecimals(2)
         self.sp_max.setSingleStep(0.1)
@@ -191,7 +204,7 @@ class PropertiesPanel(QWidget):
         # --- mask color scheme combo ────────────────────────────
         mask_cs_row = QHBoxLayout()
         mask_cs_row.addWidget(QLabel("Color Mode:"))
-        self.cmb_mask_scheme = QComboBox()
+        self.cmb_mask_scheme = _NoWheelComboBox()
         self.cmb_mask_scheme.addItems(["Original", "Solid"])
         mask_cs_row.addWidget(self.cmb_mask_scheme, 1)
         mask_vl.addLayout(mask_cs_row)
@@ -213,6 +226,11 @@ class PropertiesPanel(QWidget):
         self.w_mask_grp.setVisible(False)
 
         root.addStretch(1)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setWidth(max(hint.width(), 280))
+        return hint
 
     # ================================================================
     #  SIGNALS

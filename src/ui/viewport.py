@@ -166,7 +166,7 @@ class Viewport(QWidget):
         super().__init__(parent)
         self.layer_manager = layer_manager
         self._actors: dict[str, list[vtk.vtkActor]] = {}
-        self._bg_color = (255.0, 255.0, 255.0)  # Default to white background
+        self._bg_color = (31 / 255.0, 31 / 255.0, 31 / 255.0)  # Default to #1f1f1f
         self._right_press_pos = None
         self._picker = vtk.vtkPointPicker()
         self._picker.SetTolerance(0.01)
@@ -193,6 +193,9 @@ class Viewport(QWidget):
         self._cross_section_hover_actor = None
         self._cross_section_hover_point: np.ndarray | None = None
         self._cross_section_hover_label_actor = None
+        self._clicked_point_actor = None
+        self._clicked_point_label_actor = None
+        self._clicked_point: np.ndarray | None = None
         self._cross_section_selected_label_actors: list[vtk.vtkActor2D] = []
         self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
         self._cross_section_selected_point_indices_by_layer: dict[str, np.ndarray] = {}
@@ -327,14 +330,16 @@ class Viewport(QWidget):
 
 
     def _on_left_button_press(self, obj, event):
-        if not self._fixed_z_plane_view or not self._cross_section_active:
-            return
         x, y = obj.GetEventPosition()
-        self._handle_cross_section_pick(x, y)
+
+        if self._fixed_z_plane_view and self._cross_section_active:
+            self._handle_cross_section_pick(x, y)
+            return
+
+        self._select_clicked_visible_point(x, y)
 
     def _on_mouse_move(self, obj, event):
         x, y = obj.GetEventPosition()
-        self._update_global_hover(x, y)
         self._update_cross_section_mouse_preview(x, y)
 
     # ── event filter (right-click → background color picker) ─────
@@ -753,6 +758,42 @@ class Viewport(QWidget):
             return
         self._update_cross_section_hover(point)
 
+    def _select_clicked_visible_point(self, x, y):
+        point = self._pick_any_visible_point(x, y)
+        if point is None:
+            self._clear_clicked_point_actor()
+            self._render()
+            return
+
+        point = np.asarray(point, dtype=np.float64)
+        if self._clicked_point is not None and np.allclose(self._clicked_point, point):
+            return
+
+        self._clear_clicked_point_actor()
+        self._clicked_point_actor = self._make_sphere_actor(
+            point,
+            radius=0.1,
+            color=(1.0, 0.5, 0.0),
+        )
+        self._clicked_point_label_actor = self._make_screen_label_actor(point, (1.0, 0.5, 0.0))
+        self._clicked_point = point
+        self.renderer.AddActor(self._clicked_point_actor)
+        self.renderer.AddActor2D(self._clicked_point_label_actor)
+        self._render()
+
+    def _clear_clicked_point_actor(self):
+        removed = False
+        if self._clicked_point_actor is not None:
+            self.renderer.RemoveActor(self._clicked_point_actor)
+            self._clicked_point_actor = None
+            removed = True
+        if self._clicked_point_label_actor is not None:
+            self.renderer.RemoveActor2D(self._clicked_point_label_actor)
+            self._clicked_point_label_actor = None
+            removed = True
+        self._clicked_point = None
+        return removed
+
     def _clear_cross_section_hover_actor(self):
         removed = False
         if self._cross_section_hover_actor is not None:
@@ -915,6 +956,8 @@ class Viewport(QWidget):
                 self.renderer.RemoveActor(self._cross_section_polyline_actor)
                 self._cross_section_polyline_actor = None
             self._clear_cross_section_hover_actor()
+
+        self._clear_clicked_point_actor()
 
         if ref_actor and self._cross_section_ref_actor is not None:
             self.renderer.RemoveActor(self._cross_section_ref_actor)

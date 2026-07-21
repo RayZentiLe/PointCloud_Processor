@@ -1,6 +1,6 @@
 import numpy as np
 from PySide6.QtCore import QObject, Signal
-from core.layer import PointCloudLayer, MeshLayer, MaskGroup, LayerType
+from core.layer import PointCloudLayer, MeshLayer, MaskGroup, LayerType, clone_layer
 
 
 class LayerManager(QObject):
@@ -218,6 +218,25 @@ class LayerManager(QObject):
             return combined, ""
 
         return None, "Can only combine same-type layers."
+
+    def copy_layers(self, layer_ids):
+        copied_ids = []
+        seen = set()
+        for layer_id in layer_ids:
+            if layer_id in seen:
+                continue
+            layer = self.get_layer(layer_id)
+            if layer is None:
+                continue
+            seen.add(layer_id)
+            copied_name = self._ensure_unique_layer_name(f"{layer.name} copy")
+            copied_layer = clone_layer(layer, name=copied_name)
+            if isinstance(copied_layer, PointCloudLayer):
+                self.add_point_cloud(copied_layer)
+            elif isinstance(copied_layer, MeshLayer):
+                self.add_mesh(copied_layer)
+            copied_ids.append(copied_layer.id)
+        return copied_ids
 
     def remove_layer(self, layer_id):
         removed = False

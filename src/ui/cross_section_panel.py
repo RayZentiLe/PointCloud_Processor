@@ -2,7 +2,8 @@ import numpy as np
 import importlib
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox,
-    QHBoxLayout, QDoubleSpinBox, QComboBox, QScrollArea, QFrame
+    QHBoxLayout, QDoubleSpinBox, QComboBox, QScrollArea, QFrame,
+    QSizePolicy
 )
 from PySide6.QtCore import Signal, Qt, QEvent, QRect
 from PySide6.QtGui import QShortcut, QKeySequence, QPainter, QColor, QPen
@@ -16,6 +17,16 @@ except Exception as _e:
     _vtk_import_error = _e
 
 from core.layer import PointCloudLayer, MaskGroup
+
+
+class _NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 if VTK_AVAILABLE:
@@ -167,6 +178,8 @@ if VTK_AVAILABLE:
 
             position = np.array(camera.GetPosition()) + motion
             focal_point = np.array(camera.GetFocalPoint()) + motion
+            if self._preview_widget is not None:
+                position, focal_point = self._preview_widget._clamp_camera_to_view_bounds(position, focal_point)
             camera.SetPosition(*position)
             camera.SetFocalPoint(*focal_point)
 
@@ -190,7 +203,10 @@ if VTK_AVAILABLE:
                 zoom_factor = 1.0 / zoom_factor
 
             if camera.GetParallelProjection():
-                camera.SetParallelScale(max(camera.GetParallelScale() / zoom_factor, 1e-6))
+                new_scale = max(camera.GetParallelScale() / zoom_factor, 1e-6)
+                if self._preview_widget is not None:
+                    new_scale = self._preview_widget._clamp_parallel_scale_to_view_bounds(new_scale)
+                camera.SetParallelScale(new_scale)
             else:
                 camera.Dolly(zoom_factor)
 
@@ -202,7 +218,10 @@ if VTK_AVAILABLE:
             if camera is None:
                 return
             if camera.GetParallelProjection():
-                camera.SetParallelScale(max(camera.GetParallelScale() / 1.1, 1e-6))
+                new_scale = max(camera.GetParallelScale() / 1.1, 1e-6)
+                if self._preview_widget is not None:
+                    new_scale = self._preview_widget._clamp_parallel_scale_to_view_bounds(new_scale)
+                camera.SetParallelScale(new_scale)
             else:
                 camera.Dolly(1.1)
             self._render_locked()
@@ -216,7 +235,10 @@ if VTK_AVAILABLE:
             if camera is None:
                 return
             if camera.GetParallelProjection():
-                camera.SetParallelScale(camera.GetParallelScale() * 1.1)
+                new_scale = camera.GetParallelScale() * 1.1
+                if self._preview_widget is not None:
+                    new_scale = self._preview_widget._clamp_parallel_scale_to_view_bounds(new_scale)
+                camera.SetParallelScale(new_scale)
             else:
                 camera.Dolly(1.0 / 1.1)
             self._render_locked()
@@ -257,6 +279,7 @@ if VTK_AVAILABLE:
 
     class CrossSectionPreviewWidget(QWidget):
         selection_changed = Signal(object)
+        MAX_VIEW_HALF_EXTENT = 5000.0
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -279,12 +302,20 @@ if VTK_AVAILABLE:
             self._edge_axes_actor = None
             self._edge_axes_label_actors = []
             self._edge_axes_label_specs = []
+            self._z_scale_bar_actor = None
+            self._z_scale_bar_label_actors = []
+            self._z_scale_bar_label_specs = []
+            self._horizontal_z_scale_bar_actor = None
+            self._horizontal_z_scale_bar_label_actors = []
+            self._horizontal_z_scale_bar_label_specs = []
             self._selection_uv_rect = None
             self._drag_rectangle_actor = None
             self._selection_corner_label_actors = []
             self._selection_corner_label_specs = []
             self._selection_rectangle_actor = None
             self._selection_overlay = None
+            self._interactor_style = None
+            self._camera_modified_tag = None
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -303,16 +334,53 @@ if VTK_AVAILABLE:
             self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
             self._vtk_closed = False
 
-            interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
-            style = CrossSectionPreviewStyle(self)
-            interactor.SetInteractorStyle(style)
-            style.SetDefaultRenderer(self.renderer)
-            interactor.AddObserver(vtk.vtkCommand.InteractionEvent, style.OnInteraction)
-            self.renderer.GetActiveCamera().AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_camera_modified)
+            self._configure_vtk_interactor()
 
             self._build_scene()
             self.vtk_widget.Initialize()
             self.vtk_widget.Start()
+
+        def _configure_vtk_interactor(self):
+            render_window = self.vtk_widget.GetRenderWindow()
+            if render_window is None:
+                return
+            interactor = render_window.GetInteractor()
+            if interactor is None:
+                return
+
+            style = CrossSectionPreviewStyle(self)
+            interactor.SetInteractorStyle(style)
+            style.SetDefaultRenderer(self.renderer)
+            interactor.AddObserver(vtk.vtkCommand.InteractionEvent, style.OnInteraction)
+            self._interactor_style = style
+
+            camera = self.renderer.GetActiveCamera()
+            if camera is not None:
+                self._camera_modified_tag = camera.AddObserver(vtk.vtkCommand.ModifiedEvent, self._on_camera_modified)
+
+        def reinitialize_vtk(self):
+            if self._vtk_closed:
+                return
+            try:
+                render_window = self.vtk_widget.GetRenderWindow()
+                if render_window is None:
+                    return
+                interactor = render_window.GetInteractor()
+                if interactor is not None:
+                    try:
+                        interactor.Disable()
+                    except Exception:
+                        pass
+                    interactor.SetInteractorStyle(None)
+                render_window.SetAbortRender(1)
+                render_window.Render()
+                render_window.SetAbortRender(0)
+                self._configure_vtk_interactor()
+                self._rebuild_scene(preserve_camera=True)
+                self.vtk_widget.Initialize()
+                self.vtk_widget.Start()
+            except Exception:
+                pass
 
         def _selection_rect(self):
             if self._selection_start is None or self._selection_end is None:
@@ -389,6 +457,12 @@ if VTK_AVAILABLE:
             self._thickness = float(thickness)
             if not preserve_selection:
                 self.clear_selection()
+            elif self._selection_uv_rect:
+                left_up = self._selection_uv_rect.get("left_up", {})
+                right_bottom = self._selection_uv_rect.get("right_bottom", {})
+                if left_up and right_bottom:
+                    left_up["z"] = float(self._plane_origin[2] + float(left_up.get("v", 0.0)))
+                    right_bottom["z"] = float(self._plane_origin[2] + float(right_bottom.get("v", 0.0)))
             self._rebuild_scene(preserve_camera=preserve_camera)
 
         def set_selection_mode_enabled(self, enabled):
@@ -524,10 +598,12 @@ if VTK_AVAILABLE:
                 "left_up": {
                     "u": u_min,
                     "v": v_max,
+                    "z": float(self._plane_origin[2] + v_max),
                 },
                 "right_bottom": {
                     "u": u_max,
                     "v": v_min,
+                    "z": float(self._plane_origin[2] + v_min),
                 },
             }
 
@@ -722,10 +798,26 @@ if VTK_AVAILABLE:
             widget_width = max(float(self.vtk_widget.width()), 1.0)
             widget_height = max(float(self.vtk_widget.height()), 1.0)
             aspect = widget_width / widget_height
-            parallel_scale = max(v_span * 0.5, (u_span * 0.5) / max(aspect, 1e-6), 1e-3)
+            target_half_span = max(u_span * 0.5, v_span * 0.5, 1e-3)
+            visible_half_width = target_half_span * max(aspect, 1e-6)
+            visible_half_height = target_half_span
+
+            if visible_half_width < (u_span * 0.5):
+                target_half_span = (u_span * 0.5) / max(aspect, 1e-6)
+                visible_half_width = target_half_span * max(aspect, 1e-6)
+                visible_half_height = target_half_span
+
+            parallel_scale = max(visible_half_height, 1e-3)
             distance = max(camera.GetDistance(), 1.0)
+            parallel_scale = self._clamp_parallel_scale_to_view_bounds(parallel_scale)
             camera.SetFocalPoint(u_center, v_center, 0.0)
             camera.SetPosition(u_center, v_center, distance)
+            position, focal_point = self._clamp_camera_to_view_bounds(
+                np.array(camera.GetPosition(), dtype=np.float64),
+                np.array(camera.GetFocalPoint(), dtype=np.float64),
+            )
+            camera.SetPosition(*position)
+            camera.SetFocalPoint(*focal_point)
             camera.SetViewUp(0.0, 1.0, 0.0)
             camera.SetParallelScale(parallel_scale)
             self.renderer.ResetCameraClippingRange()
@@ -734,45 +826,319 @@ if VTK_AVAILABLE:
             self._clear_edge_axes_overlay()
             if bounds is None:
                 return
+            self._add_z_scale_bar(bounds)
+            self._add_horizontal_z_scale_bar(bounds)
+            self._refresh_overlay_labels()
 
-            u_axis_start = np.array([bounds["u_min"], bounds["v_min"], 0.0], dtype=np.float32)
-            u_axis_end = np.array([bounds["u_max"], bounds["v_min"], 0.0], dtype=np.float32)
-            v_axis_start = np.array([bounds["u_min"], bounds["v_min"], 0.0], dtype=np.float32)
-            v_axis_end = np.array([bounds["u_min"], bounds["v_max"], 0.0], dtype=np.float32)
+        def _get_visible_uv_bounds(self, fallback_bounds=None):
+            camera = self.renderer.GetActiveCamera() if hasattr(self, "renderer") else None
+            if camera is None:
+                return fallback_bounds
 
-            append = vtk.vtkAppendPolyData()
-            for start, end in ((u_axis_start, u_axis_end), (v_axis_start, v_axis_end)):
-                line_source = vtk.vtkLineSource()
-                line_source.SetPoint1(*start.tolist())
-                line_source.SetPoint2(*end.tolist())
-                line_source.Update()
-                append.AddInputData(line_source.GetOutput())
-            append.Update()
+            focal_point = camera.GetFocalPoint()
+            parallel_scale = max(float(camera.GetParallelScale()), 1e-6)
+            widget_width = max(float(self.vtk_widget.width()), 1.0)
+            widget_height = max(float(self.vtk_widget.height()), 1.0)
+            aspect = widget_width / widget_height
+            half_height = parallel_scale
+            half_width = parallel_scale * aspect
+
+            visible_bounds = {
+                "u_min": float(focal_point[0] - half_width),
+                "u_max": float(focal_point[0] + half_width),
+                "v_min": float(focal_point[1] - half_height),
+                "v_max": float(focal_point[1] + half_height),
+            }
+            half_extent = float(self.MAX_VIEW_HALF_EXTENT)
+            return {
+                "u_min": max(visible_bounds["u_min"], -half_extent),
+                "u_max": min(visible_bounds["u_max"], half_extent),
+                "v_min": max(visible_bounds["v_min"], -half_extent),
+                "v_max": min(visible_bounds["v_max"], half_extent),
+            }
+
+        def _max_parallel_scale_for_view_bounds(self):
+            widget_width = max(float(self.vtk_widget.width()), 1.0)
+            widget_height = max(float(self.vtk_widget.height()), 1.0)
+            aspect = widget_width / widget_height
+            half_extent = float(self.MAX_VIEW_HALF_EXTENT)
+            return max(min(half_extent, half_extent / max(aspect, 1e-6)), 1e-6)
+
+        def _clamp_parallel_scale_to_view_bounds(self, parallel_scale):
+            return min(max(float(parallel_scale), 1e-6), self._max_parallel_scale_for_view_bounds())
+
+        def _enforce_camera_view_bounds(self):
+            camera = self.renderer.GetActiveCamera() if hasattr(self, "renderer") else None
+            if camera is None:
+                return
+            clamped_scale = self._clamp_parallel_scale_to_view_bounds(camera.GetParallelScale())
+            if abs(clamped_scale - float(camera.GetParallelScale())) > 1e-9:
+                camera.SetParallelScale(clamped_scale)
+            position, focal_point = self._clamp_camera_to_view_bounds(
+                np.array(camera.GetPosition(), dtype=np.float64),
+                np.array(camera.GetFocalPoint(), dtype=np.float64),
+            )
+            camera.SetPosition(*position)
+            camera.SetFocalPoint(*focal_point)
+
+        def _clamp_camera_to_view_bounds(self, position, focal_point):
+            position = np.asarray(position, dtype=np.float64)
+            focal_point = np.asarray(focal_point, dtype=np.float64)
+            camera = self.renderer.GetActiveCamera() if hasattr(self, "renderer") else None
+            parallel_scale = float(camera.GetParallelScale()) if camera is not None else 1.0
+            parallel_scale = self._clamp_parallel_scale_to_view_bounds(parallel_scale)
+
+            widget_width = max(float(self.vtk_widget.width()), 1.0)
+            widget_height = max(float(self.vtk_widget.height()), 1.0)
+            aspect = widget_width / widget_height
+            half_height = parallel_scale
+            half_width = parallel_scale * aspect
+            half_extent = float(self.MAX_VIEW_HALF_EXTENT)
+
+            min_u = -half_extent + half_width
+            max_u = half_extent - half_width
+            min_v = -half_extent + half_height
+            max_v = half_extent - half_height
+
+            clamped_u = min(max(float(focal_point[0]), min_u), max_u) if min_u <= max_u else 0.0
+            clamped_v = min(max(float(focal_point[1]), min_v), max_v) if min_v <= max_v else 0.0
+            delta_u = clamped_u - float(focal_point[0])
+            delta_v = clamped_v - float(focal_point[1])
+
+            position[0] += delta_u
+            position[1] += delta_v
+            focal_point[0] = clamped_u
+            focal_point[1] = clamped_v
+            return position, focal_point
+
+        def _add_z_scale_bar(self, bounds):
+            self._clear_z_scale_bar()
+            if bounds is None:
+                return
+
+            axis_bounds = self._get_visible_uv_bounds(bounds)
+            u_span = axis_bounds["u_max"] - axis_bounds["u_min"]
+            bar_offset = max(u_span * 0.03, 0.18)
+            tick_length = max(u_span * 0.02, 0.10)
+            bar_x = axis_bounds["u_min"] + bar_offset
+            axis_origin_v = float(axis_bounds["v_min"] + bar_offset)
+            tick_step = self._compute_z_tick_step(bounds)
+
+            points = vtk.vtkPoints()
+            line_segments = [
+                ((bar_x, axis_origin_v, 0.0), (bar_x, axis_bounds["v_max"], 0.0)),
+            ]
+            sub_tick_step = self._compute_sub_tick_step(tick_step)
+            sub_tick_length = tick_length * 0.55
+
+            if sub_tick_step is not None:
+                sub_tick_distance = float(sub_tick_step)
+                max_distance = float(axis_bounds["v_max"] - axis_origin_v)
+                while sub_tick_distance <= max_distance + 1e-9:
+                    if abs((sub_tick_distance / tick_step) - round(sub_tick_distance / tick_step)) > 1e-9:
+                        tick_v = float(axis_origin_v + sub_tick_distance)
+                        if axis_origin_v - 1e-6 <= tick_v <= axis_bounds["v_max"] + 1e-6:
+                            line_segments.append(
+                                ((bar_x, tick_v, 0.0), (bar_x + sub_tick_length, tick_v, 0.0))
+                            )
+                    sub_tick_distance += sub_tick_step
+
+            start_tick = np.ceil(0.0 / tick_step) * tick_step
+            end_tick = np.floor((axis_bounds["v_max"] - axis_origin_v) / tick_step) * tick_step
+            tick_values = []
+            tick_distance = float(start_tick)
+            while tick_distance <= float(end_tick) + 1e-9:
+                tick_v = float(axis_origin_v + tick_distance)
+                if tick_v < axis_origin_v - 1e-6 or tick_v > axis_bounds["v_max"] + 1e-6:
+                    tick_distance += tick_step
+                    continue
+                tick_values.append((float(tick_distance), tick_v))
+                line_segments.append(
+                    ((bar_x, tick_v, 0.0), (bar_x + tick_length, tick_v, 0.0))
+                )
+                tick_distance += tick_step
+
+            zero_v = axis_origin_v
+            zero_in_bounds = axis_origin_v - 1e-6 <= zero_v <= axis_bounds["v_max"] + 1e-6
+            has_zero_tick = any(abs(tick_value[0]) < 1e-9 for tick_value in tick_values)
+            if zero_in_bounds and not has_zero_tick:
+                tick_values.append((0.0, zero_v))
+                tick_values.sort(key=lambda item: item[0])
+                line_segments.append(
+                    ((bar_x, zero_v, 0.0), (bar_x + tick_length, zero_v, 0.0))
+                )
+
+            point_index = 0
+            for start_point, end_point in line_segments:
+                points.InsertNextPoint(*start_point)
+                points.InsertNextPoint(*end_point)
+
+            cells = vtk.vtkCellArray()
+            for _ in line_segments:
+                line = vtk.vtkLine()
+                line.GetPointIds().SetId(0, point_index)
+                line.GetPointIds().SetId(1, point_index + 1)
+                cells.InsertNextCell(line)
+                point_index += 2
+
+            poly_data = vtk.vtkPolyData()
+            poly_data.SetPoints(points)
+            poly_data.SetLines(cells)
 
             mapper = vtk.vtkPolyDataMapper()
-            mapper.SetInputConnection(append.GetOutputPort())
+            mapper.SetInputData(poly_data)
 
-            self._edge_axes_actor = vtk.vtkActor()
-            self._edge_axes_actor.SetMapper(mapper)
-            self._edge_axes_actor.GetProperty().SetColor(0.7, 0.7, 0.7)
-            self._edge_axes_actor.GetProperty().SetLineWidth(1.5)
-            self.renderer.AddActor(self._edge_axes_actor)
+            self._z_scale_bar_actor = vtk.vtkActor()
+            self._z_scale_bar_actor.SetMapper(mapper)
+            self._z_scale_bar_actor.GetProperty().SetColor(0.65, 0.65, 0.65)
+            self._z_scale_bar_actor.GetProperty().SetLineWidth(1.5)
+            self.renderer.AddActor(self._z_scale_bar_actor)
 
-            self._edge_axes_label_specs = [
-                {
-                    "point": np.array([bounds["u_max"], bounds["v_min"], 0.0], dtype=np.float32),
-                    "text": "U",
-                    "color": (0.9, 0.9, 0.9),
-                    "offset": (-18, 8),
-                },
-                {
-                    "point": np.array([bounds["u_min"], bounds["v_max"], 0.0], dtype=np.float32),
-                    "text": "V",
-                    "color": (0.9, 0.9, 0.9),
-                    "offset": (8, -18),
-                },
+            self._z_scale_bar_label_specs = []
+            for tick_distance, tick_v in tick_values:
+                self._z_scale_bar_label_specs.append(
+                    {
+                        "point": np.array([bar_x + tick_length, tick_v, 0.0], dtype=np.float32),
+                        "text": self._format_tick_label(tick_distance, tick_step),
+                        "color": (0.65, 0.65, 0.65),
+                        "offset": (8, -8),
+                    }
+                )
+
+        def _compute_z_tick_step(self, bounds):
+            v_span = max(float(bounds["v_max"] - bounds["v_min"]), 1e-6)
+            camera = self.renderer.GetActiveCamera() if hasattr(self, "renderer") else None
+            parallel_scale = float(camera.GetParallelScale()) if camera is not None else (v_span * 0.5)
+            visible_v_span = max(parallel_scale * 2.0, 1e-6)
+            widget_height = max(float(self.vtk_widget.height()), 1.0)
+            units_per_pixel = visible_v_span / widget_height
+            target_pixels = 120.0
+            raw_step = max(units_per_pixel * target_pixels, 1e-6)
+            allowed_steps = [
+                1000.0, 500.0, 100.0, 50.0,
+                10.0, 5.0, 1.0, 0.5, 0.1,
             ]
-            self._refresh_overlay_labels()
+            for step in allowed_steps:
+                if raw_step >= step - 1e-9:
+                    return step
+            return allowed_steps[-1]
+
+        def _compute_sub_tick_step(self, tick_step):
+            tick_step = float(tick_step)
+            sub_tick_map = {
+                0.5: 0.1,
+                1.0: 0.1,
+                5.0: 1.0,
+                10.0: 1.0,
+                50.0: 10.0,
+                100.0: 10.0,
+                500.0: 100.0,
+                1000.0: 100.0,
+                5000.0: 1000.0,
+                10000.0: 1000.0,
+            }
+            return sub_tick_map.get(tick_step)
+
+        def _format_tick_label(self, value, tick_step):
+            value = float(value)
+            if tick_step >= 1.0:
+                rounded = round(value)
+                if abs(value - rounded) < 1e-9:
+                    return str(int(rounded))
+            return f"{value:.1f}"
+
+        def _add_horizontal_z_scale_bar(self, bounds):
+            self._clear_horizontal_z_scale_bar()
+            if bounds is None:
+                return
+
+            axis_bounds = self._get_visible_uv_bounds(bounds)
+            u_span = axis_bounds["u_max"] - axis_bounds["u_min"]
+            v_span = axis_bounds["v_max"] - axis_bounds["v_min"]
+            bar_offset = max(v_span * 0.05, 0.18)
+            tick_length = max(v_span * 0.03, 0.10)
+            axis_origin_u = float(axis_bounds["u_min"] + bar_offset)
+            bar_y = axis_bounds["v_min"] + bar_offset
+            tick_step = self._compute_z_tick_step(bounds)
+
+            points = vtk.vtkPoints()
+            line_segments = [
+                ((axis_origin_u, bar_y, 0.0), (axis_bounds["u_max"], bar_y, 0.0)),
+            ]
+            sub_tick_step = self._compute_sub_tick_step(tick_step)
+            sub_tick_length = tick_length * 0.55
+
+            if sub_tick_step is not None:
+                sub_tick_distance = float(sub_tick_step)
+                max_distance = float(axis_bounds["u_max"] - axis_origin_u)
+                while sub_tick_distance <= max_distance + 1e-9:
+                    if abs((sub_tick_distance / tick_step) - round(sub_tick_distance / tick_step)) > 1e-9:
+                        tick_u = float(axis_origin_u + sub_tick_distance)
+                        if axis_origin_u - 1e-6 <= tick_u <= axis_bounds["u_max"] + 1e-6:
+                            line_segments.append(
+                                ((tick_u, bar_y, 0.0), (tick_u, bar_y + sub_tick_length, 0.0))
+                            )
+                    sub_tick_distance += sub_tick_step
+
+            start_tick = np.ceil(0.0 / tick_step) * tick_step
+            end_tick = np.floor((axis_bounds["u_max"] - axis_origin_u) / tick_step) * tick_step
+            tick_values = []
+            tick_distance = float(start_tick)
+            while tick_distance <= float(end_tick) + 1e-9:
+                tick_u = float(axis_origin_u + tick_distance)
+                if tick_u < axis_origin_u - 1e-6 or tick_u > axis_bounds["u_max"] + 1e-6:
+                    tick_distance += tick_step
+                    continue
+                tick_values.append((float(tick_distance), float(tick_u)))
+                line_segments.append(
+                    ((tick_u, bar_y, 0.0), (tick_u, bar_y + tick_length, 0.0))
+                )
+                tick_distance += tick_step
+
+            has_zero_tick = any(abs(tick_value[0]) < 1e-9 for tick_value in tick_values)
+            if axis_origin_u - 1e-6 <= axis_origin_u <= axis_bounds["u_max"] + 1e-6 and not has_zero_tick:
+                tick_values.append((0.0, axis_origin_u))
+                tick_values.sort(key=lambda item: item[0])
+                line_segments.append(
+                    ((axis_origin_u, bar_y, 0.0), (axis_origin_u, bar_y + tick_length, 0.0))
+                )
+
+            point_index = 0
+            for start_point, end_point in line_segments:
+                points.InsertNextPoint(*start_point)
+                points.InsertNextPoint(*end_point)
+
+            cells = vtk.vtkCellArray()
+            for _ in line_segments:
+                line = vtk.vtkLine()
+                line.GetPointIds().SetId(0, point_index)
+                line.GetPointIds().SetId(1, point_index + 1)
+                cells.InsertNextCell(line)
+                point_index += 2
+
+            poly_data = vtk.vtkPolyData()
+            poly_data.SetPoints(points)
+            poly_data.SetLines(cells)
+
+            mapper = vtk.vtkPolyDataMapper()
+            mapper.SetInputData(poly_data)
+
+            self._horizontal_z_scale_bar_actor = vtk.vtkActor()
+            self._horizontal_z_scale_bar_actor.SetMapper(mapper)
+            self._horizontal_z_scale_bar_actor.GetProperty().SetColor(0.65, 0.65, 0.65)
+            self._horizontal_z_scale_bar_actor.GetProperty().SetLineWidth(1.5)
+            self.renderer.AddActor(self._horizontal_z_scale_bar_actor)
+
+            self._horizontal_z_scale_bar_label_specs = []
+            for tick_label, tick_u in tick_values:
+                self._horizontal_z_scale_bar_label_specs.append(
+                    {
+                        "point": np.array([tick_u, bar_y + tick_length, 0.0], dtype=np.float32),
+                        "text": self._format_tick_label(tick_label, tick_step),
+                        "color": (0.65, 0.65, 0.65),
+                        "offset": (-18, 8),
+                    }
+                )
 
         def _clear_edge_axes_overlay(self):
             if self._edge_axes_actor is not None:
@@ -782,6 +1148,26 @@ if VTK_AVAILABLE:
                 self.renderer.RemoveActor2D(actor)
             self._edge_axes_label_actors = []
             self._edge_axes_label_specs = []
+            self._clear_z_scale_bar()
+            self._clear_horizontal_z_scale_bar()
+
+        def _clear_z_scale_bar(self):
+            if self._z_scale_bar_actor is not None:
+                self.renderer.RemoveActor(self._z_scale_bar_actor)
+                self._z_scale_bar_actor = None
+            for actor in self._z_scale_bar_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._z_scale_bar_label_actors = []
+            self._z_scale_bar_label_specs = []
+
+        def _clear_horizontal_z_scale_bar(self):
+            if self._horizontal_z_scale_bar_actor is not None:
+                self.renderer.RemoveActor(self._horizontal_z_scale_bar_actor)
+                self._horizontal_z_scale_bar_actor = None
+            for actor in self._horizontal_z_scale_bar_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._horizontal_z_scale_bar_label_actors = []
+            self._horizontal_z_scale_bar_label_specs = []
 
         def _clear_selection_corner_labels(self):
             for actor in self._selection_corner_label_actors:
@@ -908,30 +1294,89 @@ if VTK_AVAILABLE:
             coord = self._world_to_display(point)
             label = vtk.vtkTextActor()
             label.SetInput(text)
-            label.SetPosition(coord[0] + offset[0], coord[1] + offset[1])
             text_prop = label.GetTextProperty()
             text_prop.SetFontSize(14)
             text_prop.SetColor(*color)
             text_prop.SetBold(True)
+            font_size = text_prop.GetFontSize()
+            x_offset = float(offset[0])
+            if x_offset < 0:
+                x_offset = -self._estimate_label_width(text, font_size) * 0.5
+            label.SetPosition(coord[0] + x_offset, coord[1] + offset[1])
             return label
 
-        def _on_camera_modified(self, obj=None, event=None):
-            if self._vtk_closed:
-                return
-            self._refresh_overlay_labels()
+        def _estimate_label_width(self, text, font_size):
+            return max(len(str(text)), 1) * float(font_size) * 0.62
 
-        def _refresh_overlay_labels(self):
-            for actor in self._edge_axes_label_actors:
-                self.renderer.RemoveActor2D(actor)
-            self._edge_axes_label_actors = []
-            for spec in self._edge_axes_label_specs:
+        def _build_axis_label_actors(self, specs, horizontal=False):
+            actors = []
+            if not specs:
+                return actors
+
+            font_size = 14
+            min_font_size = 8
+            if len(specs) > 1:
+                sorted_specs = sorted(
+                    specs,
+                    key=lambda spec: float(spec["point"][0] if horizontal else spec["point"][1])
+                )
+                while font_size > min_font_size:
+                    overlap_found = False
+                    previous_center = None
+                    previous_half_span = None
+                    for spec in sorted_specs:
+                        coord = self._world_to_display(spec["point"])
+                        center = float(coord[0] if horizontal else coord[1])
+                        half_span = self._estimate_label_width(spec["text"], font_size) * 0.5 if horizontal else float(font_size) * 0.7
+                        if previous_center is not None and abs(center - previous_center) < (half_span + previous_half_span + 4.0):
+                            overlap_found = True
+                            break
+                        previous_center = center
+                        previous_half_span = half_span
+                    if not overlap_found:
+                        break
+                    font_size -= 1
+
+            for spec in specs:
                 actor = self._make_axis_label_actor(
                     spec["point"],
                     spec["text"],
                     spec["color"],
                     offset=spec["offset"],
                 )
+                actor.GetTextProperty().SetFontSize(font_size)
+                actors.append(actor)
+            return actors
+
+        def _on_camera_modified(self, obj=None, event=None):
+            if self._vtk_closed:
+                return
+            self._enforce_camera_view_bounds()
+            if self._uv_bounds is not None:
+                self._add_z_scale_bar(self._uv_bounds)
+                self._add_horizontal_z_scale_bar(self._uv_bounds)
+            self._refresh_overlay_labels()
+
+        def _refresh_overlay_labels(self):
+            for actor in self._edge_axes_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._edge_axes_label_actors = []
+            for actor in self._build_axis_label_actors(self._edge_axes_label_specs, horizontal=True):
                 self._edge_axes_label_actors.append(actor)
+                self.renderer.AddActor2D(actor)
+
+            for actor in self._z_scale_bar_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._z_scale_bar_label_actors = []
+            for actor in self._build_axis_label_actors(self._z_scale_bar_label_specs, horizontal=False):
+                self._z_scale_bar_label_actors.append(actor)
+                self.renderer.AddActor2D(actor)
+
+            for actor in self._horizontal_z_scale_bar_label_actors:
+                self.renderer.RemoveActor2D(actor)
+            self._horizontal_z_scale_bar_label_actors = []
+            for actor in self._build_axis_label_actors(self._horizontal_z_scale_bar_label_specs, horizontal=True):
+                self._horizontal_z_scale_bar_label_actors.append(actor)
                 self.renderer.AddActor2D(actor)
 
             for actor in self._selection_corner_label_actors:
@@ -1014,13 +1459,13 @@ if VTK_AVAILABLE:
             self._selection_corner_label_specs = [
                 {
                     "point": np.array([left_up["u"], left_up["v"], 0.0], dtype=np.float32),
-                    "text": f"LU ({left_up['u']:.3f}, {left_up['v']:.3f})",
+                    "text": f"LU (u={left_up['u']:.3f}, v={left_up['v']:.3f}, z={left_up.get('z', self._plane_origin[2] + left_up['v']):.3f})",
                     "color": (1.0, 1.0, 1.0),
                     "offset": (8, -22),
                 },
                 {
                     "point": np.array([right_bottom["u"], right_bottom["v"], 0.0], dtype=np.float32),
-                    "text": f"RB ({right_bottom['u']:.3f}, {right_bottom['v']:.3f})",
+                    "text": f"RB (u={right_bottom['u']:.3f}, v={right_bottom['v']:.3f}, z={right_bottom.get('z', self._plane_origin[2] + right_bottom['v']):.3f})",
                     "color": (1.0, 1.0, 1.0),
                     "offset": (-150, 8),
                 },
@@ -1045,6 +1490,7 @@ if VTK_AVAILABLE:
                 self._selection_overlay.raise_()
                 self._selection_overlay.show()
                 self._selection_overlay.update()
+            self.reinitialize_vtk()
 
         def _make_points_actor(self, points, colors=None, color=(1.0, 1.0, 1.0), point_size=2):
             vtk_pts = vtk.vtkPoints()
@@ -1102,6 +1548,7 @@ if VTK_AVAILABLE:
 class CrossSectionPanel(QWidget):
     cross_section_created = Signal(object)
     points_transfer_requested = Signal(str, str, object)
+
     def __init__(self, viewport, layer_manager, parent=None):
         super().__init__(parent)
         self.viewport = viewport
@@ -1124,13 +1571,14 @@ class CrossSectionPanel(QWidget):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setFrameShape(QFrame.NoFrame)
         outer_layout.addWidget(scroll, 1)
+        self._scroll_area = scroll
 
         content = QWidget()
         scroll.setWidget(content)
 
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(10)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         if not VTK_AVAILABLE:
             lbl = QLabel("Cross Section requires VTK, which could not be imported.")
@@ -1148,35 +1596,44 @@ class CrossSectionPanel(QWidget):
             "Define the cross section to preview all visible point clouds."
         )
         self._status_label.setWordWrap(True)
+        self._status_label.setMinimumWidth(0)
         layout.addWidget(self._status_label)
 
         # ✅ ADD THIS BUTTON
         self._define_normal_btn = QPushButton("Define Normal")
+        self._define_normal_btn.setMinimumHeight(32)
+        self._define_normal_btn.setMaximumWidth(350)
         self._define_normal_btn.setEnabled(False)  # disabled until valid layer
         layout.addWidget(self._define_normal_btn)
 
         self._clear_normal_demo_btn = QPushButton("Clear Screen")
+        self._clear_normal_demo_btn.setMinimumHeight(32)
+        self._clear_normal_demo_btn.setMaximumWidth(350)
         self._clear_normal_demo_btn.setEnabled(False)
         layout.addWidget(self._clear_normal_demo_btn)
 
         thickness_row = QHBoxLayout()
+        thickness_row.setSpacing(6)
         thickness_row.addWidget(QLabel("Distance range:"))
-        self._thickness_spin = QDoubleSpinBox(self)
+        self._thickness_spin = _NoWheelDoubleSpinBox(self)
         self._thickness_spin.setDecimals(2)
         self._thickness_spin.setRange(0.0001, 1_000_000.0)
         self._thickness_spin.setSingleStep(0.5)
         self._thickness_spin.setValue(1.0)
+        self._thickness_spin.setMinimumWidth(110)
         self._thickness_spin.valueChanged.connect(self._on_thickness_value_changed)
         thickness_row.addWidget(self._thickness_spin)
         layout.addLayout(thickness_row)
 
         step_row = QHBoxLayout()
+        step_row.setSpacing(6)
         step_row.addWidget(QLabel("Move step:"))
-        self._step_spin = QDoubleSpinBox(self)
+        self._step_spin = _NoWheelDoubleSpinBox(self)
         self._step_spin.setDecimals(2)
         self._step_spin.setRange(0.0001, 1_000_000.0)
         self._step_spin.setSingleStep(0.5)
         self._step_spin.setValue(1.0)
+        self._step_spin.setMinimumWidth(110)
         step_row.addWidget(self._step_spin)
         layout.addLayout(step_row)
 
@@ -1187,34 +1644,53 @@ class CrossSectionPanel(QWidget):
         self._selection_uv_label.setWordWrap(True)
         layout.addWidget(self._selection_uv_label)
 
-        transfer_row = QHBoxLayout()
-        transfer_row.addWidget(QLabel("From (layer):"))
-        self._from_layer_combo = QComboBox(self)
-        transfer_row.addWidget(self._from_layer_combo)
-        transfer_row.addWidget(QLabel("To (layer):"))
-        self._to_layer_combo = QComboBox(self)
-        transfer_row.addWidget(self._to_layer_combo)
+        transfer_row = QVBoxLayout()
+        transfer_row.setSpacing(6)
+        from_row = QHBoxLayout()
+        from_row.setSpacing(6)
+        from_label = QLabel("From:")
+        from_label.setMinimumWidth(42)
+        from_row.addWidget(from_label)
+        self._from_layer_combo = _NoWheelComboBox(self)
+        self._from_layer_combo.setMinimumWidth(0)
+        self._from_layer_combo.setMaximumWidth(350)
+        from_row.addWidget(self._from_layer_combo, 1)
+        transfer_row.addLayout(from_row)
+
+        to_row = QHBoxLayout()
+        to_row.setSpacing(6)
+        to_label = QLabel("To:")
+        to_label.setMinimumWidth(42)
+        to_row.addWidget(to_label)
+        self._to_layer_combo = _NoWheelComboBox(self)
+        self._to_layer_combo.setMinimumWidth(0)
+        self._to_layer_combo.setMaximumWidth(350)
+        to_row.addWidget(self._to_layer_combo, 1)
+        transfer_row.addLayout(to_row)
         layout.addLayout(transfer_row)
 
         self._transfer_note_label = QLabel(
-            "Note: you can only transfer points within different meshes in the same layer."
+            "Note: only selected points in the chosen source sublayer will be transferred to the chosen target sublayer within the current layer."
         )
         self._transfer_note_label.setWordWrap(True)
         layout.addWidget(self._transfer_note_label)
 
         preview_container = QWidget(content)
+        preview_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_layout = QVBoxLayout(preview_container)
-        preview_layout.setContentsMargins(10, 10, 10, 10)
-        preview_layout.setSpacing(6)
+        preview_layout.setContentsMargins(6, 6, 6, 6)
+        preview_layout.setSpacing(4)
 
         preview_label = QLabel("Preview")
         preview_layout.addWidget(preview_label)
 
         self._preview_widget = CrossSectionPreviewWidget(self)
-        self._preview_widget.setMinimumHeight(280)
+        self._preview_widget.setMinimumHeight(220)
+        self._preview_widget.setMaximumHeight(16777215)
+        self._preview_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_layout.addWidget(self._preview_widget, 1)
-        layout.addWidget(preview_container)
-        layout.addStretch()
+        layout.addWidget(preview_container, 1)
+        layout.setStretchFactor(preview_container, 1)
         self._preview_widget.selection_changed.connect(self._on_preview_selection_changed)
         self._preview_widget.set_selection_mode_enabled(True)
 
@@ -1240,13 +1716,32 @@ class CrossSectionPanel(QWidget):
         self.layer_manager.layer_added.connect(self._refresh_transfer_layer_options)
         self.layer_manager.layer_removed.connect(self._refresh_transfer_layer_options)
         self.layer_manager.layer_modified.connect(self._refresh_transfer_layer_options)
+        self.layer_manager.layer_modified.connect(self._on_layer_modified)
         self.layer_manager.selection_changed.connect(lambda _layer: self._refresh_transfer_layer_options())
+        self._from_layer_combo.currentIndexChanged.connect(self._sync_transfer_target_with_source)
 
         self._refresh_transfer_layer_options()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_preview_height_to_panel()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_preview_height_to_panel()
 
     def _show_vtk_error(self):
         QMessageBox.critical(self, "VTK Import Error",
                              f"VTK could not be imported:\n{_vtk_import_error}")
+
+    def _sync_preview_height_to_panel(self):
+        if self._preview_widget is None or not hasattr(self, "_scroll_area"):
+            return
+        viewport = self._scroll_area.viewport()
+        if viewport is None:
+            return
+        available_height = max(viewport.height() - 320, 220)
+        self._preview_widget.setMinimumHeight(available_height)
 
     def shutdown_vtk(self):
         if self._preview_widget is not None and hasattr(self._preview_widget, "shutdown_vtk"):
@@ -1346,7 +1841,7 @@ class CrossSectionPanel(QWidget):
             self._status_label.setText(
                 "Define the cross section to preview all visible point clouds."
                 if not has_defined_normal else
-                "Cross section preview is active for all visible point clouds."
+                "Cross section preview is active for all visible point clouds. Noted that you can only pick points in Fixed Z Plane View."
             )
             self._define_normal_btn.setEnabled(has_defined_normal)
             self._normal_pick_mode_active = False
@@ -1376,8 +1871,8 @@ class CrossSectionPanel(QWidget):
         right_bottom = selection_uv_rect["right_bottom"]
         self._selection_uv_label.setText(
             "Selection UV: "
-            f"left-up (u={left_up['u']:.3f}, v={left_up['v']:.3f}), "
-            f"right-bottom (u={right_bottom['u']:.3f}, v={right_bottom['v']:.3f})"
+            f"left-up (u={left_up['u']:.3f}, v={left_up['v']:.3f}, z={left_up.get('z', 0.0):.3f}), "
+            f"right-bottom (u={right_bottom['u']:.3f}, v={right_bottom['v']:.3f}, z={right_bottom.get('z', 0.0):.3f})"
         )
         self._transfer_selected_points()
 
@@ -1389,12 +1884,11 @@ class CrossSectionPanel(QWidget):
         current_to = self._to_layer_combo.currentData()
 
         options = []
-        for layer in self.layer_manager.point_clouds.values():
-            if not getattr(layer, "visible", True):
-                continue
-            for mask_group in layer.mask_groups:
-                options.append((f"{layer.name} / {mask_group.positive_name}", mask_group.positive_name))
-                options.append((f"{layer.name} / {mask_group.negative_name}", mask_group.negative_name))
+        current_layer = getattr(self, "_current_layer", None)
+        if isinstance(current_layer, PointCloudLayer):
+            for mask_group in current_layer.mask_groups:
+                options.append((mask_group.positive_name, mask_group.positive_name))
+                options.append((mask_group.negative_name, mask_group.negative_name))
 
         self._from_layer_combo.blockSignals(True)
         self._to_layer_combo.blockSignals(True)
@@ -1404,12 +1898,14 @@ class CrossSectionPanel(QWidget):
         self._to_layer_combo.addItem("Select target", None)
         for label, value in options:
             self._from_layer_combo.addItem(label, value)
-            self._to_layer_combo.addItem(label, value)
 
         self._restore_combo_selection(self._from_layer_combo, current_from)
-        self._restore_combo_selection(self._to_layer_combo, current_to)
+        self._sync_transfer_target_with_source(preferred_target=current_to)
         self._from_layer_combo.blockSignals(False)
         self._to_layer_combo.blockSignals(False)
+
+    def _on_layer_modified(self, _layer_id):
+        self.refresh_preview()
 
     def _restore_combo_selection(self, combo, value):
         if value is None:
@@ -1417,6 +1913,36 @@ class CrossSectionPanel(QWidget):
             return
         index = combo.findData(value)
         combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _sync_transfer_target_with_source(self, _index=None, preferred_target=None):
+        if not hasattr(self, "_from_layer_combo") or not hasattr(self, "_to_layer_combo"):
+            return
+
+        from_layer = self._from_layer_combo.currentData()
+        current_layer = getattr(self, "_current_layer", None)
+
+        self._to_layer_combo.blockSignals(True)
+        self._to_layer_combo.clear()
+        self._to_layer_combo.addItem("Select target", None)
+
+        paired_target = None
+        if isinstance(current_layer, PointCloudLayer) and from_layer:
+            for mask_group in current_layer.mask_groups:
+                if mask_group.positive_name == from_layer:
+                    paired_target = mask_group.negative_name
+                    break
+                if mask_group.negative_name == from_layer:
+                    paired_target = mask_group.positive_name
+                    break
+
+        if paired_target:
+            self._to_layer_combo.addItem(paired_target, paired_target)
+            target_value = paired_target if preferred_target != paired_target else preferred_target
+            self._restore_combo_selection(self._to_layer_combo, target_value)
+        else:
+            self._to_layer_combo.setCurrentIndex(0)
+
+        self._to_layer_combo.blockSignals(False)
 
     def _transfer_selected_points(self):
         if self._transfer_in_progress:
@@ -1427,7 +1953,13 @@ class CrossSectionPanel(QWidget):
         if not from_layer or not to_layer or from_layer == to_layer:
             return
 
-        selected_indices = getattr(self.viewport, "_cross_section_selected_point_indices", None)
+        current_layer = getattr(self, "_current_layer", None)
+        selected_by_layer = getattr(self.viewport, "_cross_section_selected_point_indices_by_layer", {})
+        selected_indices = None
+        if isinstance(current_layer, PointCloudLayer):
+            selected_indices = selected_by_layer.get(current_layer.id)
+        if selected_indices is None:
+            selected_indices = getattr(self.viewport, "_cross_section_selected_point_indices", None)
         if selected_indices is None or len(selected_indices) == 0:
             return
 
@@ -1509,7 +2041,7 @@ class CrossSectionPanel(QWidget):
                 "Normal selection mode: click two points to form a normal. Right-click cancels. (noted that you can not click point under orbit view)"
             )
         elif has_completed_normal:
-            self._status_label.setText("Cross section preview is active for all visible point clouds.")
+            self._status_label.setText("Cross section preview is active for all visible point clouds. Noted that you can only pick points in Fixed Z Plane View.")
 
         self._update_define_normal_button()
         if has_completed_normal:

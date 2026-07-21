@@ -5,6 +5,11 @@ from PySide6.QtWidgets import (
 from core.layer import PointCloudLayer, MeshLayer
 
 
+class _NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class CombineDialog(QDialog):
     def __init__(self, layer_manager, parent=None):
         super().__init__(parent)
@@ -21,8 +26,8 @@ class CombineDialog(QDialog):
         grp = QGroupBox("Select Layers")
         form = QFormLayout(grp)
 
-        self._combo_a = QComboBox()
-        self._combo_b = QComboBox()
+        self._combo_a = _NoWheelComboBox()
+        self._combo_b = _NoWheelComboBox()
         all_layers = self.lm.get_all_layers()
         for l in all_layers:
             tag = "PC" if isinstance(l, PointCloudLayer) else "Mesh"

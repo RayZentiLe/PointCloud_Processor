@@ -1,4 +1,5 @@
 import uuid
+import copy
 import numpy as np
 from enum import Enum, auto
 
@@ -110,3 +111,40 @@ class MeshLayer:
     @property
     def face_count(self):
         return len(self.faces)
+
+
+def clone_layer(layer, name=None):
+    if isinstance(layer, PointCloudLayer):
+        cloned = PointCloudLayer(
+            name=name or layer.name,
+            points=layer.points.copy(),
+            colors=layer.colors.copy() if layer.colors is not None else None,
+            normals=layer.normals.copy() if layer.normals is not None else None,
+            source_path=layer.source_path,
+            modified=True,
+        )
+    elif isinstance(layer, MeshLayer):
+        cloned = MeshLayer(
+            name=name or layer.name,
+            vertices=layer.vertices.copy(),
+            faces=layer.faces.copy(),
+            vertex_colors=(layer.vertex_colors.copy()
+                           if layer.vertex_colors is not None else None),
+            face_normals=(layer.face_normals.copy()
+                          if layer.face_normals is not None else None),
+            vertex_normals=(layer.vertex_normals.copy()
+                            if layer.vertex_normals is not None else None),
+            source_path=layer.source_path,
+            modified=True,
+        )
+    else:
+        raise TypeError("Unsupported layer type")
+
+    cloned.visible = layer.visible
+    cloned.display_color = copy.deepcopy(layer.display_color)
+    cloned.mask_groups = copy.deepcopy(layer.mask_groups)
+    cloned.render_props = copy.deepcopy(layer.render_props)
+    for attr in ("vis_color_scheme", "vis_solid_color"):
+        if hasattr(layer, attr):
+            setattr(cloned, attr, copy.deepcopy(getattr(layer, attr)))
+    return cloned
