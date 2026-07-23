@@ -206,6 +206,11 @@ class MainWindow(QMainWindow):
     def _restore_cross_section_dock_position(self):
         if not hasattr(self, "cross_section_dock"):
             return
+        if not self.cross_section_dock.isVisible():
+            return
+        layers_visible = self.layers_dock.isVisible() if hasattr(self, "layers_dock") else None
+        properties_visible = self.properties_dock.isVisible() if hasattr(self, "properties_dock") else None
+        log_visible = self.log_dock.isVisible() if hasattr(self, "log_dock") else None
         self.cross_section_dock.hide()
         self.cross_section_dock.setParent(self)
         self.cross_section_dock.setFloating(False)
@@ -216,6 +221,13 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.RightDockWidgetArea, self.cross_section_dock)
             if hasattr(self, "properties_dock") and self.properties_dock.isVisible():
                 self.splitDockWidget(self.properties_dock, self.cross_section_dock, Qt.Vertical)
+        if layers_visible is not None:
+            self.layers_dock.setVisible(layers_visible)
+        if properties_visible is not None:
+            self.properties_dock.setVisible(properties_visible)
+        if log_visible is not None:
+            self.log_dock.setVisible(log_visible)
+        self.cross_section_dock.setVisible(False)
         self._apply_initial_dock_layout()
 
     def _build_menus(self):
@@ -1080,8 +1092,6 @@ class MainWindow(QMainWindow):
                 "Click on a point cloud in the Layers panel, then open the Cross Section panel.")
             return
 
-        self._restore_cross_section_dock_position()
-        self.cross_section_dock.setFloating(False)
         self.cross_section_dock.setVisible(True)
         self.cross_section_dock.raise_()
 
@@ -1409,15 +1419,12 @@ class MainWindow(QMainWindow):
         self.toolbar.properties_action.blockSignals(True)
         self.toolbar.properties_action.setChecked(visible)
         self.toolbar.properties_action.blockSignals(False)
-        if hasattr(self, "cross_section_dock") and self.cross_section_dock.isVisible():
-            self._restore_cross_section_dock_position()
 
     def _on_log_visibility_changed(self, visible):
         """Update Windows menu when Log panel visibility changes."""
         self.toolbar.log_action.blockSignals(True)
         self.toolbar.log_action.setChecked(visible)
         self.toolbar.log_action.blockSignals(False)
-        self.props_panel.visual_changed.connect(self.viewport.rebuild_all)
 
     def set_app_font_size(self, size):
         font = self.font()
@@ -1436,7 +1443,7 @@ class _CrossSectionDockWidget(QDockWidget):
     def closeEvent(self, event):
         main_window = self.parent()
         restore_handler = getattr(main_window, "_restore_cross_section_dock_position", None)
-        if callable(restore_handler):
+        if self.isFloating() and callable(restore_handler):
             try:
                 event.ignore()
                 restore_handler()
@@ -1444,13 +1451,12 @@ class _CrossSectionDockWidget(QDockWidget):
                 return
             except Exception:
                 pass
+        event.ignore()
+        self.hide()
         try:
             widget = self.widget()
-            shutdown_preview = getattr(widget, "shutdown_vtk", None)
-            if callable(shutdown_preview):
-                shutdown_preview()
+            refresh_preview = getattr(widget, "refresh_preview", None)
+            if callable(refresh_preview):
+                refresh_preview()
         except Exception:
             pass
-        super().closeEvent(event)
-        if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
-            self.cross_section_panel.refresh_preview()

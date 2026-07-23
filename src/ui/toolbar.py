@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QWidgetAction, QToolBar, QMenu, QToolButton, QLabel
 from PySide6.QtCore import Signal, Qt
+from PySide6.QtGui import QKeySequence, QShortcut
 
 
 HELP_SECTIONS = [
@@ -9,7 +10,7 @@ HELP_SECTIONS = [
             ("Open files", "Use the toolbar Open button or press Ctrl+O."),
             ("Export selected layer", "Use the Export button or press Ctrl+E after selecting a layer."),
             ("Drag and drop", "Drop supported files directly into the application window to load them."),
-            ("Undo / Redo", "Use the toolbar buttons to undo or redo supported actions.\nSupported: Combine layer(s), Delete layer(s),\nCross Section point transfer."),
+            ("Undo / Redo", "Use the toolbar buttons or press Ctrl+Z / Ctrl+Y to undo or redo supported actions.\nSupported: Combine layer(s), Delete layer(s),\nCross Section point transfer."),
         ],
     },
     {
@@ -17,6 +18,7 @@ HELP_SECTIONS = [
         "items": [
             ("Right click layer", "Open actions such as Rename, Assign Colour,\nCombine, Export, Delete, and Set Camera to Layer."),
             ("Multi-select layers", "Use Shift/Ctrl+Left Click in the Layers panel\nto combine or delete several layers."),
+            ("Auto-assign colours", "Select one or more point cloud layers, then\nright click in the Layers panel and choose Assign Colour\nto automatically assign colours."),
             ("Reorder layers", "Drag selected layers in the Layers panel to change their order."),
             ("Toggle visibility", "Use the checkbox beside each layer or sublayer to show or hide it."),
         ],
@@ -46,6 +48,7 @@ HELP_SECTIONS = [
             ("Show or hide panels", "Use the Windows menu in the toolbar to toggle\nLayers, Properties, Cross Section, and Log panels."),
             ("Font size", "Use Windows > Font Size to switch between\nSmall, Medium, Large, and Extra Large text."),
             ("Cross Section panel", "The Cross Section panel is hidden by default and appears when enabled."),
+            ("Floating Cross Section window", "Drag the Cross Section panel by its title bar\nout of the main window to open it as a separate window."),
         ],
     },
     {
@@ -97,6 +100,16 @@ class Toolbar(QToolBar):
         # Add Windows dropdown menu
         self._create_windows_menu()
         self._create_help_menu()
+        self._create_shortcuts()
+
+    def _create_shortcuts(self):
+        self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), self)
+        self._undo_shortcut.setContext(Qt.ApplicationShortcut)
+        self._undo_shortcut.activated.connect(self.undo_requested.emit)
+
+        self._redo_shortcut = QShortcut(QKeySequence("Ctrl+Y"), self)
+        self._redo_shortcut.setContext(Qt.ApplicationShortcut)
+        self._redo_shortcut.activated.connect(self.redo_requested.emit)
 
     def _create_windows_menu(self):
         """Create the Windows dropdown menu for panel visibility."""

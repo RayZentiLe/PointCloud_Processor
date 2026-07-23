@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QSizePolicy
 )
 from PySide6.QtCore import Signal, Qt, QEvent, QRect
-from PySide6.QtGui import QShortcut, QKeySequence, QPainter, QColor, QPen
+from PySide6.QtGui import QShortcut, QKeySequence
 
 try:
     import vtk
@@ -32,35 +32,6 @@ class _NoWheelDoubleSpinBox(QDoubleSpinBox):
 if VTK_AVAILABLE:
     import vtk
     from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-
-    class SelectionOverlay(QWidget):
-        def __init__(self, preview_widget, parent=None):
-            super().__init__(parent)
-            self._preview_widget = preview_widget
-            self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            self.setAttribute(Qt.WA_NoSystemBackground, True)
-            self.setAttribute(Qt.WA_TranslucentBackground, True)
-            self.hide()
-
-        def paintEvent(self, event):
-            super().paintEvent(event)
-            if self._preview_widget is None:
-                return
-            if not self._preview_widget._selection_mode_enabled:
-                return
-            if not self._preview_widget._selection_drag_active:
-                return
-
-            rect = self._preview_widget._selection_rect()
-            if rect.isNull():
-                return
-
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(QColor(255, 255, 255), 3, Qt.DashLine))
-            painter.setBrush(QColor(255, 255, 255, 35))
-            painter.drawRect(rect)
-            painter.end()
 
     class CrossSectionPreviewStyle(vtk.vtkInteractorStyleTrackballCamera):
         def __init__(self, preview_widget=None):
@@ -324,11 +295,6 @@ if VTK_AVAILABLE:
             layout.addWidget(self.vtk_widget)
             self.vtk_widget.setMouseTracking(True)
             self.vtk_widget.installEventFilter(self)
-            self._selection_overlay = SelectionOverlay(self, self.vtk_widget)
-            self._selection_overlay.setGeometry(self.vtk_widget.rect())
-            self._selection_overlay.raise_()
-            self._selection_overlay.show()
-
             self.renderer = vtk.vtkRenderer()
             self.renderer.SetBackground(0.1, 0.1, 0.12)
             self.vtk_widget.GetRenderWindow().AddRenderer(self.renderer)
@@ -484,8 +450,6 @@ if VTK_AVAILABLE:
             self._clear_selection_corner_labels()
             self.selection_changed.emit(None)
             self.vtk_widget.update()
-            if self._selection_overlay is not None:
-                self._selection_overlay.update()
             if hasattr(self, "renderer"):
                 self._rebuild_scene()
 
@@ -502,8 +466,6 @@ if VTK_AVAILABLE:
             self._selection_end = (qt_x, qt_y)
             self._update_drag_rectangle_actor()
             self.vtk_widget.update()
-            if self._selection_overlay is not None:
-                self._selection_overlay.update()
             return True
 
         def handle_mouse_move(self):
@@ -517,8 +479,6 @@ if VTK_AVAILABLE:
             self._selection_end = (qt_x, qt_y)
             self._update_drag_rectangle_actor()
             self.vtk_widget.update()
-            if self._selection_overlay is not None:
-                self._selection_overlay.update()
             return True
 
         def handle_left_button_up(self):
@@ -534,8 +494,6 @@ if VTK_AVAILABLE:
             self._clear_drag_rectangle_actor()
             self._apply_rectangle_selection()
             self.vtk_widget.update()
-            if self._selection_overlay is not None:
-                self._selection_overlay.update()
             return True
 
         def eventFilter(self, obj, event):
@@ -547,16 +505,12 @@ if VTK_AVAILABLE:
                     self._selection_end = (pos.x(), pos.y())
                     self._update_drag_rectangle_actor()
                     self.vtk_widget.update()
-                    if self._selection_overlay is not None:
-                        self._selection_overlay.update()
                     return True
                 if event.type() == QEvent.Type.MouseMove and self._selection_drag_active:
                     pos = event.position().toPoint()
                     self._selection_end = (pos.x(), pos.y())
                     self._update_drag_rectangle_actor()
                     self.vtk_widget.update()
-                    if self._selection_overlay is not None:
-                        self._selection_overlay.update()
                     return True
                 if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton and self._selection_drag_active:
                     pos = event.position().toPoint()
@@ -565,8 +519,6 @@ if VTK_AVAILABLE:
                     self._clear_drag_rectangle_actor()
                     self._apply_rectangle_selection()
                     self.vtk_widget.update()
-                    if self._selection_overlay is not None:
-                        self._selection_overlay.update()
                     return True
             return super().eventFilter(obj, event)
 

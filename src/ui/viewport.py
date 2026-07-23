@@ -179,6 +179,8 @@ class Viewport(QWidget):
         self._cross_section_pick_mode = "direction"
         self._cross_section_line_actor = None
         self._cross_section_preview_line_actor = None
+        self._cross_section_preview_plane_actor = None
+        self._cross_section_preview_plane_trace_actor = None
         self._cross_section_confirmed_line_actor = None  # Green line when confirmed
         self._cross_section_polyline_actor = None  # Vertical cross-section plane actor
         self._cross_section_point_actors: list[vtk.vtkActor] = []
@@ -199,7 +201,7 @@ class Viewport(QWidget):
         self._cross_section_selected_label_actors: list[vtk.vtkActor2D] = []
         self._cross_section_selected_point_indices = np.empty((0,), dtype=np.int32)
         self._cross_section_selected_point_indices_by_layer: dict[str, np.ndarray] = {}
-        self._cross_section_selection_color = np.array([1.0, 1.0, 0.0], dtype=np.float64)
+        self._cross_section_selection_color = np.array([1.0, 1.0, 1.0], dtype=np.float64)
         self._fixed_z_plane_view = True
 
         layout = QVBoxLayout(self)
@@ -568,6 +570,14 @@ class Viewport(QWidget):
             self.renderer.RemoveActor(self._cross_section_preview_line_actor)
             self._cross_section_preview_line_actor = None
 
+        if self._cross_section_preview_plane_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_preview_plane_actor)
+            self._cross_section_preview_plane_actor = None
+
+        if self._cross_section_preview_plane_trace_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_preview_plane_trace_actor)
+            self._cross_section_preview_plane_trace_actor = None
+
         # Remove confirmed line
         if self._cross_section_confirmed_line_actor is not None:
             self.renderer.RemoveActor(self._cross_section_confirmed_line_actor)
@@ -689,11 +699,27 @@ class Viewport(QWidget):
             if self._cross_section_preview_line_actor is not None:
                 self.renderer.RemoveActor(self._cross_section_preview_line_actor)
                 self._cross_section_preview_line_actor = None
+            if self._cross_section_preview_plane_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_actor)
+                self._cross_section_preview_plane_actor = None
+            if self._cross_section_preview_plane_trace_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_trace_actor)
+                self._cross_section_preview_plane_trace_actor = None
                 self._render()
             return
         point = self._pick_cross_section_point(x, y)
         if point is None:
+            if self._cross_section_preview_line_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_line_actor)
+                self._cross_section_preview_line_actor = None
+            if self._cross_section_preview_plane_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_actor)
+                self._cross_section_preview_plane_actor = None
+            if self._cross_section_preview_plane_trace_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_trace_actor)
+                self._cross_section_preview_plane_trace_actor = None
             self._update_cross_section_hover(None)
+            self._render()
             return
         self._cross_section_preview_point = point
         self._update_cross_section_hover(point)
@@ -701,6 +727,14 @@ class Viewport(QWidget):
         if self._cross_section_preview_line_actor is not None:
             self.renderer.RemoveActor(self._cross_section_preview_line_actor)
             self._cross_section_preview_line_actor = None
+
+        if self._cross_section_preview_plane_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_preview_plane_actor)
+            self._cross_section_preview_plane_actor = None
+
+        if self._cross_section_preview_plane_trace_actor is not None:
+            self.renderer.RemoveActor(self._cross_section_preview_plane_trace_actor)
+            self._cross_section_preview_plane_trace_actor = None
 
         layer = self.layer_manager.get_layer(self._cross_section_layer_id)
         if layer is None or len(layer.points) == 0:
@@ -726,6 +760,78 @@ class Viewport(QWidget):
             width=3,
         )
         self.renderer.AddActor(self._cross_section_preview_line_actor)
+
+        p0 = np.asarray(self._cross_section_points[0], dtype=np.float64)
+        p1 = np.asarray(point, dtype=np.float64)
+        delta_xy = p1[:2] - p0[:2]
+        delta_norm = np.linalg.norm(delta_xy)
+        if delta_norm > 0:
+            direction_xy = delta_xy / delta_norm
+            plane_normal_xy = np.array([-direction_xy[1], direction_xy[0]], dtype=np.float64)
+            plane_normal_xy = plane_normal_xy / np.linalg.norm(plane_normal_xy)
+
+            if layer is None or len(layer.points) == 0:
+                span = max(delta_norm, 1.0)
+                min_z = float(min(p0[2], p1[2]))
+                max_z = float(max(p0[2], p1[2], preview_z))
+            else:
+                span = float(np.linalg.norm(np.ptp(layer.points[:, :2], axis=0)))
+                span = max(span, 1.0)
+                min_z = float(np.min(layer.points[:, 2]))
+                max_z = float(np.max(layer.points[:, 2]))
+
+            if abs(max_z - min_z) < 1e-6:
+                max_z = min_z + max(span * 0.25, 1.0)
+
+            plane_half_length = span * 1.5
+            plane_center_xy = p0[:2] + direction_xy * self._cross_section_plane_offset
+
+            plane_bottom_start = np.array([
+                plane_center_xy[0] - plane_normal_xy[0] * plane_half_length,
+                plane_center_xy[1] - plane_normal_xy[1] * plane_half_length,
+                min_z,
+            ], dtype=np.float64)
+            plane_bottom_end = np.array([
+                plane_center_xy[0] + plane_normal_xy[0] * plane_half_length,
+                plane_center_xy[1] + plane_normal_xy[1] * plane_half_length,
+                min_z,
+            ], dtype=np.float64)
+            plane_top_start = np.array([
+                plane_bottom_start[0],
+                plane_bottom_start[1],
+                max_z,
+            ], dtype=np.float64)
+            plane_top_end = np.array([
+                plane_bottom_end[0],
+                plane_bottom_end[1],
+                max_z,
+            ], dtype=np.float64)
+
+            self._cross_section_preview_plane_actor = self._make_plane_actor(
+                plane_bottom_start,
+                plane_bottom_end,
+                plane_top_end,
+                plane_top_start,
+                color=(0.0, 0.7, 0.7),
+                opacity=0.25,
+            )
+            self.renderer.AddActor(self._cross_section_preview_plane_actor)
+
+            self._cross_section_preview_plane_trace_actor = self._make_line_actor(
+                np.array([
+                    plane_bottom_start[0],
+                    plane_bottom_start[1],
+                    max_z,
+                ], dtype=np.float64),
+                np.array([
+                    plane_bottom_end[0],
+                    plane_bottom_end[1],
+                    max_z,
+                ], dtype=np.float64),
+                color=(0.0, 0.9, 0.9),
+                width=2,
+            )
+            self.renderer.AddActor(self._cross_section_preview_plane_trace_actor)
         self._render()
 
     def _update_cross_section_hover(self, point):
@@ -949,6 +1055,18 @@ class Viewport(QWidget):
             if self._cross_section_preview_line_actor is not None:
                 self.renderer.RemoveActor(self._cross_section_preview_line_actor)
                 self._cross_section_preview_line_actor = None
+            if self._cross_section_preview_plane_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_actor)
+                self._cross_section_preview_plane_actor = None
+            if self._cross_section_preview_plane_trace_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_trace_actor)
+                self._cross_section_preview_plane_trace_actor = None
+            if self._cross_section_preview_plane_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_actor)
+                self._cross_section_preview_plane_actor = None
+            if self._cross_section_preview_plane_trace_actor is not None:
+                self.renderer.RemoveActor(self._cross_section_preview_plane_trace_actor)
+                self._cross_section_preview_plane_trace_actor = None
             if self._cross_section_confirmed_line_actor is not None:
                 self.renderer.RemoveActor(self._cross_section_confirmed_line_actor)
                 self._cross_section_confirmed_line_actor = None
