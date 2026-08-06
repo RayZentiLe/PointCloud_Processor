@@ -1521,13 +1521,16 @@ class Viewport(QWidget):
                       else mask_group.negative_color_mode)
         solid_color = (mask_group.positive_solid_color if is_positive 
                        else mask_group.negative_solid_color)
+        gradient_colors = (mask_group.positive_gradient_colors if is_positive
+                           else mask_group.negative_gradient_colors)
         
         if color_mode == "original":
-            # Keep parent color - no change needed
-            pass
+            return colors
         elif color_mode == "solid":
             # Apply solid color to masked indices
             colors[mask_idx] = np.array(solid_color, dtype=np.float64)
+        elif color_mode == "gradient" and gradient_colors is not None:
+            colors[mask_idx] = np.asarray(gradient_colors[mask_idx], dtype=np.float64)
         
         return colors
 

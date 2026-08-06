@@ -37,6 +37,9 @@ class MaskGroup:
         # but map them to the new system
         self.positive_color = positive_color
         self.negative_color = negative_color
+        self.positive_gradient_colors = None
+        self.negative_gradient_colors = None
+        self.metadata = {}
 
     @property
     def positive_count(self):
@@ -70,6 +73,7 @@ class PointCloudLayer:
             "render_mode": "points",          # "points" | "decoration"
             "point_size": 2,                  # 1-20
         }
+        self.hidden_color_sets = {}
 
     @property
     def point_count(self):

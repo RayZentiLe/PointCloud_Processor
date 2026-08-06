@@ -287,6 +287,7 @@ if VTK_AVAILABLE:
             self._selection_overlay = None
             self._interactor_style = None
             self._camera_modified_tag = None
+            self._last_camera_state = None
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -451,7 +452,7 @@ if VTK_AVAILABLE:
             self.selection_changed.emit(None)
             self.vtk_widget.update()
             if hasattr(self, "renderer"):
-                self._rebuild_scene()
+                self._rebuild_scene(preserve_camera=True)
 
         def handle_left_button_down(self):
             if not self._selection_mode_enabled:
@@ -526,7 +527,9 @@ if VTK_AVAILABLE:
             if self._selection_start is None or self._selection_end is None:
                 self._selected_preview_indices = np.empty((0,), dtype=np.int32)
                 self._drag_preview_indices = np.empty((0,), dtype=np.int32)
-                self._rebuild_scene(preserve_camera=True)
+                self._clear_selection_rectangle_actor()
+                self._clear_selection_corner_labels()
+                self.vtk_widget.GetRenderWindow().Render()
                 return
 
             rect = QRect(
@@ -542,7 +545,10 @@ if VTK_AVAILABLE:
                 self._drag_preview_indices = np.empty((0,), dtype=np.int32)
                 self._selection_uv_rect = None
                 self.selection_changed.emit(None)
-                self._rebuild_scene(preserve_camera=True)
+                self._clear_selection_rectangle_actor()
+                self._clear_selection_corner_labels()
+                self._selection_corner_label_specs = []
+                self.vtk_widget.GetRenderWindow().Render()
                 return
 
             selected_indices, u_min, u_max, v_min, v_max = self._compute_preview_selection_from_rect(rect)
@@ -657,7 +663,7 @@ if VTK_AVAILABLE:
             camera = self.renderer.GetActiveCamera()
             if camera is None:
                 return None
-            return {
+            state = {
                 "position": tuple(camera.GetPosition()),
                 "focal_point": tuple(camera.GetFocalPoint()),
                 "view_up": tuple(camera.GetViewUp()),
@@ -665,6 +671,8 @@ if VTK_AVAILABLE:
                 "parallel_scale": float(camera.GetParallelScale()),
                 "clipping_range": tuple(camera.GetClippingRange()),
             }
+            self._last_camera_state = state.copy()
+            return state
 
         def _restore_camera_state(self, state):
             if not state:
@@ -681,6 +689,7 @@ if VTK_AVAILABLE:
             clipping_range = state.get("clipping_range")
             if clipping_range is not None:
                 camera.SetClippingRange(*clipping_range)
+            self._last_camera_state = dict(state)
 
         def _compute_preview_points(self):
             if len(self._layer_points) == 0:
@@ -1308,6 +1317,7 @@ if VTK_AVAILABLE:
                 self._add_z_scale_bar(self._uv_bounds)
                 self._add_horizontal_z_scale_bar(self._uv_bounds)
             self._refresh_overlay_labels()
+            self._last_camera_state = self._capture_camera_state()
 
         def _refresh_overlay_labels(self):
             for actor in self._edge_axes_label_actors:
@@ -1354,6 +1364,7 @@ if VTK_AVAILABLE:
             self._build_scene(preserve_camera=preserve_camera)
             if preserve_camera:
                 self._restore_camera_state(saved_camera_state)
+                self.renderer.ResetCameraClippingRange()
             self._add_selection_rectangle()
             self._add_selection_corner_labels()
             self.vtk_widget.GetRenderWindow().Render()
@@ -1431,7 +1442,11 @@ if VTK_AVAILABLE:
                 self._selection_overlay.raise_()
                 self._selection_overlay.update()
             if hasattr(self, "renderer"):
-                self._apply_parallel_scale_from_bounds()
+                if self._selection_uv_rect is None and self._last_camera_state is None:
+                    self._apply_parallel_scale_from_bounds()
+                elif self._last_camera_state is not None:
+                    self._restore_camera_state(self._last_camera_state)
+                    self.renderer.ResetCameraClippingRange()
                 self._refresh_overlay_labels()
                 self.vtk_widget.GetRenderWindow().Render()
 
@@ -1443,6 +1458,11 @@ if VTK_AVAILABLE:
                 self._selection_overlay.show()
                 self._selection_overlay.update()
             self.reinitialize_vtk()
+            if self._last_camera_state is not None:
+                self._restore_camera_state(self._last_camera_state)
+                self.renderer.ResetCameraClippingRange()
+                self._refresh_overlay_labels()
+                self.vtk_widget.GetRenderWindow().Render()
 
         def _make_points_actor(self, points, colors=None, color=(1.0, 1.0, 1.0), point_size=2):
             vtk_pts = vtk.vtkPoints()
@@ -1812,9 +1832,25 @@ class CrossSectionPanel(QWidget):
         self._preview_widget.set_selection_mode_enabled(True)
 
     def _on_preview_selection_changed(self, selection_uv_rect):
+        preview_camera_state = None
+        if self._preview_widget is not None and hasattr(self._preview_widget, "_capture_camera_state"):
+            preview_camera_state = self._preview_widget._capture_camera_state()
+
         self._selection_uv_bounds = selection_uv_rect
         if hasattr(self.viewport, "set_cross_section_preview_selection"):
             self.viewport.set_cross_section_preview_selection(selection_uv_rect)
+
+        if (
+            preview_camera_state is not None
+            and self._preview_widget is not None
+            and hasattr(self._preview_widget, "_restore_camera_state")
+            and hasattr(self._preview_widget, "renderer")
+        ):
+            self._preview_widget._restore_camera_state(preview_camera_state)
+            self._preview_widget.renderer.ResetCameraClippingRange()
+            self._preview_widget._refresh_overlay_labels()
+            self._preview_widget.vtk_widget.GetRenderWindow().Render()
+
         if not selection_uv_rect:
             self._selection_uv_label.setText("Selection UV: -")
             return

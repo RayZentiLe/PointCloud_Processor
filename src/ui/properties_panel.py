@@ -205,7 +205,7 @@ class PropertiesPanel(QWidget):
         mask_cs_row = QHBoxLayout()
         mask_cs_row.addWidget(QLabel("Color Mode:"))
         self.cmb_mask_scheme = _NoWheelComboBox()
-        self.cmb_mask_scheme.addItems(["Original", "Solid"])
+        self.cmb_mask_scheme.addItems(["Original", "Solid", "Gradient"])
         mask_cs_row.addWidget(self.cmb_mask_scheme, 1)
         mask_vl.addLayout(mask_cs_row)
 

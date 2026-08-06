@@ -49,6 +49,23 @@ def compute_gradient_colors(values: np.ndarray,
     return np.stack([r, g, b], axis=-1).astype(np.float32)
 
 
+def compute_white_black_gradient(values: np.ndarray,
+                                 min_val: float,
+                                 max_val: float) -> np.ndarray:
+    """Map scalar values to a white→black gradient in [0, 1]."""
+    n = len(values)
+    if n == 0:
+        return np.empty((0, 3), dtype=np.float32)
+
+    if max_val == min_val:
+        return np.ones((n, 3), dtype=np.float32)
+
+    t = (values - min_val) / (max_val - min_val)
+    t = np.clip(t, 0.0, 1.0)
+    intensity = 1.0 - t
+    return np.repeat(intensity[:, None], 3, axis=1).astype(np.float32)
+
+
 # ── internal ─────────────────────────────────────────────────────
 
 def _hsv_to_rgb_vec(h, s, v):

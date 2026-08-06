@@ -3,6 +3,7 @@ import sys
 import gc
 import colorsys
 import traceback
+import copy
 import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog,
@@ -956,6 +957,15 @@ class MainWindow(QMainWindow):
         return meshes[0] if meshes else None
 
     def _noise_done(self, lid, mg):
+        layer = self.lm.get_layer(lid)
+        if isinstance(layer, PointCloudLayer):
+            metadata = getattr(mg, "metadata", {}) or {}
+            gradient_colors = metadata.get("gradient_colors")
+            distance_values = metadata.get("distance_values")
+            if gradient_colors is not None:
+                layer.hidden_color_sets["noise_distance_gradient"] = np.array(gradient_colors, copy=True)
+            if distance_values is not None:
+                layer.hidden_color_sets["noise_distance_values"] = np.array(distance_values, copy=True)
         self.lm.add_mask_group(lid, mg)
         self.log.log(
             f"Noise Removal complete: {mg.positive_count:,} clean, "
@@ -1262,6 +1272,7 @@ class MainWindow(QMainWindow):
             "modified": layer.modified,
             "display_color": None if layer.display_color is None else tuple(layer.display_color),
             "render_props": dict(layer.render_props),
+            "mask_groups": copy.deepcopy(layer.mask_groups),
         }
         if isinstance(layer, PointCloudLayer):
             data.update({
@@ -1269,6 +1280,7 @@ class MainWindow(QMainWindow):
                 "points": np.array(layer.points, copy=True),
                 "colors": None if layer.colors is None else np.array(layer.colors, copy=True),
                 "normals": None if layer.normals is None else np.array(layer.normals, copy=True),
+                "hidden_color_sets": copy.deepcopy(getattr(layer, "hidden_color_sets", {})),
                 "source_path": layer.source_path,
             })
         elif isinstance(layer, MeshLayer):
@@ -1293,6 +1305,7 @@ class MainWindow(QMainWindow):
                 source_path=snapshot.get("source_path"),
                 modified=snapshot.get("modified", False),
             )
+            layer.hidden_color_sets = copy.deepcopy(snapshot.get("hidden_color_sets", {}))
             self.lm.add_point_cloud(layer)
         else:
             layer = MeshLayer(
@@ -1310,6 +1323,7 @@ class MainWindow(QMainWindow):
         layer.visible = snapshot.get("visible", True)
         layer.display_color = snapshot.get("display_color")
         layer.render_props = dict(snapshot.get("render_props", {}))
+        layer.mask_groups = copy.deepcopy(snapshot.get("mask_groups", []))
         if isinstance(layer, PointCloudLayer):
             self.lm._point_clouds.pop(next(reversed(self.lm._point_clouds)))
             self.lm._point_clouds[layer.id] = layer
