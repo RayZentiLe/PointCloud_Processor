@@ -4,6 +4,7 @@ import gc
 import colorsys
 import traceback
 import copy
+from pathlib import Path
 import numpy as np
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QFileDialog,
@@ -25,6 +26,7 @@ from ui.dialogs.loading_dialog import LoadingDialog
 # Defer heavy I/O imports (open3d, exporters) until runtime to avoid
 # import-time failures in environments without those packages.
 from workers.task_runner import TaskRunner
+from tools.neupps_runner import NeuPPSError, import_neupps_mesh, run_neupps
 
 
 class MainWindow(QMainWindow):
@@ -244,6 +246,7 @@ class MainWindow(QMainWindow):
         tb.undo_requested.connect(self._on_global_undo_requested)
         tb.redo_requested.connect(self._on_global_redo_requested)
         tb.auto_denoise_requested.connect(self._run_auto_denoise)
+        tb.neupps_requested.connect(self._run_neupps)
         tb.pca_requested.connect(self._run_pca)
         tb.poisson_requested.connect(self._run_poisson)
         tb.mesh_filter_requested.connect(self._run_mf)
@@ -375,6 +378,60 @@ class MainWindow(QMainWindow):
             if show_error_dialog:
                 QMessageBox.critical(self, "Error", str(e))
             return False
+
+    def _run_neupps(self):
+        layer = self.lm.get_selected_layer()
+        if not isinstance(layer, PointCloudLayer):
+            QMessageBox.information(self, "NeuPPS", "Select a point cloud layer first.")
+            return
+
+        if not layer.source_path:
+            QMessageBox.warning(
+                self,
+                "NeuPPS",
+                "The selected point cloud has no source file path. Export it to a supported file first.",
+            )
+            return
+
+        source_path = Path(layer.source_path)
+        if not source_path.exists():
+            QMessageBox.warning(
+                self,
+                "NeuPPS",
+                f"Source file not found:\n{source_path}",
+            )
+            return
+
+        self.log.log(f"NeuPPS: running on '{layer.name}' from {source_path}")
+        self._launch(
+            run_neupps,
+            self._on_neupps_done,
+            loading_title="NeuPPS",
+            loading_message="Running NeuPPS mesh reconstruction...",
+            point_cloud_path=str(source_path),
+        )
+
+    def _on_neupps_done(self, result):
+        mesh_path = result.get("mesh_path")
+        if not mesh_path:
+            raise NeuPPSError("NeuPPS completed without a mesh path.")
+
+        layer = import_neupps_mesh(mesh_path)
+        if not isinstance(layer, MeshLayer):
+            raise NeuPPSError(f"NeuPPS output is not a mesh: {mesh_path}")
+
+        output_dir = result.get("output_dir")
+        layer.name = f"NeuPPS {Path(mesh_path).stem}"
+        layer.modified = True
+        self.lm.add_mesh(layer)
+        self.lm.set_selection(layer.id)
+        self.viewport.fit_all()
+        self.log.log(f"NeuPPS: loaded mesh '{layer.name}' from {mesh_path}")
+        if output_dir:
+            self.log.log(f"NeuPPS: output folder {output_dir}")
+        runner_log_path = result.get("runner_log_path")
+        if runner_log_path:
+            self.log.log(f"NeuPPS: runner log {runner_log_path}")
 
     def _export_sel(self):
         layer = self.lm.get_selected_layer()
@@ -1046,6 +1103,7 @@ class MainWindow(QMainWindow):
 
         self._worker = TaskRunner(func, **kw)
         self._worker.progress.connect(self._on_worker_progress)
+        self._worker.status.connect(self._on_worker_status)
         self._worker.finished_result.connect(
             lambda r, _cb=on_done: self._task_ok(r, _cb))
         self._worker.cancelled.connect(self._task_cancelled)
@@ -1056,16 +1114,25 @@ class MainWindow(QMainWindow):
         
         self._worker.start()
 
+    def _reset_task_ui(self):
+        self.pbar.setVisible(False)
+        self.toolbar.setEnabled(True)
+        self._worker = None
+
     def _on_worker_progress(self, value):
         """Update both progress bar and loading dialog."""
         self.pbar.setValue(value)
         if self._loading_dialog:
             self._loading_dialog.set_progress(value)
 
+    def _on_worker_status(self, message):
+        self.log.log(message)
+        if self._loading_dialog:
+            self._loading_dialog.set_message(message)
+
     def _task_ok(self, result, cb):
         self._close_loading_dialog()
-        self.pbar.setVisible(False)
-        self.toolbar.setEnabled(True)
+        self._reset_task_ui()
         print(f"[MainWindow] Task finished OK", file=sys.stderr)
         gc.collect()  # Force garbage collection to release RAM
         try:
@@ -1078,16 +1145,14 @@ class MainWindow(QMainWindow):
     def _task_cancelled(self):
         """Handle task cancellation."""
         self._close_loading_dialog()
-        self.pbar.setVisible(False)
-        self.toolbar.setEnabled(True)
+        self._reset_task_ui()
         print(f"[MainWindow] Task cancelled by user", file=sys.stderr)
         gc.collect()  # Force garbage collection to release RAM
         self.log.log("Task cancelled by user.")
 
     def _task_err(self, msg):
         self._close_loading_dialog()
-        self.pbar.setVisible(False)
-        self.toolbar.setEnabled(True)
+        self._reset_task_ui()
         self.log.log(f"ERROR: {msg}")
         print(f"[MainWindow] Task FAILED: {msg}", file=sys.stderr)
         gc.collect()  # Force garbage collection to release RAM
@@ -1402,6 +1467,14 @@ class MainWindow(QMainWindow):
             self._loading_dialog = None
 
     def closeEvent(self, event):
+        try:
+            if self._worker and self._worker.isRunning():
+                self._worker.request_cancel()
+                self._close_loading_dialog()
+                self._reset_task_ui()
+        except Exception:
+            pass
+
         try:
             if hasattr(self, "cross_section_panel") and self.cross_section_panel is not None:
                 shutdown_preview = getattr(self.cross_section_panel, "shutdown_vtk", None)

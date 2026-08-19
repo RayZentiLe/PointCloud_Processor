@@ -12,7 +12,7 @@ class LoadingDialog(QDialog):
         self.setWindowTitle(title)
         self.setMinimumWidth(400)
         self.setMinimumHeight(150)
-        self.setWindowModality(Qt.WindowModal)
+        self.setWindowModality(Qt.NonModal)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowCloseButtonHint)
         
         layout = QVBoxLayout(self)

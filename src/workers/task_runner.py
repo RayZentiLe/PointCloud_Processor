@@ -7,6 +7,7 @@ class TaskRunner(QThread):
     """Run a heavy function in a background thread with cancellation support."""
 
     progress = Signal(int)          # 0-100
+    status = Signal(str)
     finished_result = Signal(object)
     error = Signal(str)
     cancelled = Signal()
@@ -29,6 +30,7 @@ class TaskRunner(QThread):
         try:
             print(f"[Worker] Starting: {self._func.__name__}", file=sys.stderr)
             self._kwargs["progress_cb"] = self._emit_progress
+            self.status_cb = self._emit_status
             self._kwargs["cancel_cb"] = self.is_cancelled
             result = self._func(**self._kwargs)
             
@@ -46,3 +48,6 @@ class TaskRunner(QThread):
 
     def _emit_progress(self, value):
         self.progress.emit(int(value))
+
+    def _emit_status(self, message):
+        self.status.emit(str(message))
